@@ -84,11 +84,19 @@ function resolvePeer(input: string, peers: PeerEntry[]): { name: string; auto_co
   return { name: best.name, auto_corrected: { from: input, distance: bestDist } };
 }
 
-// Tracks call_ids that THIS session resolved locally (accepted or denied).
-// When we later receive the corresponding invite_resolved broadcast from
-// peerd, we suppress it — we already know what happened; no need to fire a
-// self-canceling channel block that confuses the agent.
+// Tracks call_ids that THIS session resolved locally (accepted or denied)
+// via tool calls. Used twice:
+//   (a) Suppress the self-broadcast of invite_resolved we'd otherwise emit
+//       a confusing "accepted in another session" channel block for.
+//   (b) Mark THIS session as the "owner" of the call_id, so subsequent
+//       connected/message/ended channel events are emitted ONLY for calls
+//       this session has actually accepted/initiated. Without this, every
+//       open claude session would get connected events for every call on
+//       the machine and race to peer_recv.
+// (a) clears the entry after one use. (b) reads the entry on every poll
+// tick; we use a separate set for (b) so (a)'s cleanup doesn't break it.
 const handledLocally = new Set<string>();
+const ownedByThisSession = new Set<string>();
 
 async function main() {
   const client = await PeerdClient.connect(SOCKET_PATH).catch((err) => {
@@ -178,6 +186,9 @@ async function main() {
         params,
         { timeoutMs: (inviteTimeoutS + 20) * 1000 },
       );
+      // Mark THIS session as the owner of the call so subsequent connected/
+      // ended channel events are delivered to this session's agent only.
+      if (res?.call_id) ownedByThisSession.add(res.call_id);
       return asTextResult({ ...res, auto_corrected: resolved.auto_corrected });
     },
   );
@@ -218,7 +229,8 @@ async function main() {
       },
     },
     async ({ call_id }) => {
-      handledLocally.add(call_id); // suppress self-broadcast of invite_resolved
+      handledLocally.add(call_id);      // suppress self-broadcast of invite_resolved
+      ownedByThisSession.add(call_id);  // claim ownership of this call's events
       return asTextResult(await client.call("accept_invite", { call_id }));
     },
   );
@@ -234,7 +246,8 @@ async function main() {
       },
     },
     async ({ call_id, reason }) => {
-      handledLocally.add(call_id); // suppress self-broadcast of invite_resolved
+      handledLocally.add(call_id);     // suppress self-broadcast of invite_resolved
+      // (don't claim ownership for a deny — there will be no further events to drive)
       return asTextResult(await client.call("deny_invite", { call_id, reason }));
     },
   );
@@ -340,6 +353,14 @@ async function startChannelBridge(server: McpServer, client: PeerdClient): Promi
   // Track which call_ids have been resolved (accepted/declined elsewhere)
   // BEFORE we got around to emitting them. We won't emit invites for these.
   const resolvedBeforeEmit = new Set<string>();
+  // Track which call_ids THIS session "owns" — meaning it's the one that should
+  // drive the connected/message/ended channel events for that call. A session
+  // owns a call if it accepted the invite locally (handledLocally on accept) OR
+  // if it initiated the call locally via peer_invite. Without this, a second
+  // session that happens to see the same call's "connected" event would race
+  // the primary session to peer_recv and burn tokens for no reason.
+  // (Note: handledLocally is already declared at module scope above for the
+  // self-broadcast-suppress logic; we reuse it here for ownership.)
 
   // Subscribe to incoming invites + resolution events.
   client.subscribe("subscribe_inbox", {}, (n: unknown) => {
@@ -447,6 +468,15 @@ async function startChannelBridge(server: McpServer, client: PeerdClient): Promi
         const prev = lastState.get(c.call_id);
         const cur = { state: c.state, floor: c.floor };
         lastState.set(c.call_id, cur);
+        // CRITICAL: only emit connected/ended for calls THIS session owns.
+        // A call is "owned" if THIS session's user either accepted the invite
+        // (peer_accept_invite) OR initiated the call via peer_invite. We track
+        // that via ownedByThisSession. Without this check, every concurrent
+        // claude session on the machine would receive its own connected event
+        // and race to peer_recv — burning tokens and double-reading.
+        if (!ownedByThisSession.has(c.call_id)) {
+          continue;
+        }
         // Emit a "connected" event the moment a call flips into CONNECTED.
         if (prev?.state !== "CONNECTED" && cur.state === "CONNECTED") {
           emitChannel(server, {
