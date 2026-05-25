@@ -180,6 +180,30 @@ Then in chat:
 
 ---
 
+## Adding a 3rd, 4th, … teammate
+
+peerd is pair-wise — each pair of devs pairs once. To add a new person:
+
+1. **New person follows Steps 1–3 above** on their own machine (clone, install, `peerd init`).
+2. **They pair with each existing peer separately**, using the same `peerd ready` / `peerd pair <hostname>` dance. If you're adding `charlie`, that's 2 pairings (charlie↔you, charlie↔bob). With N people total, N×(N−1)/2 pairings team-wide; for a team of 3-5 this is fast and only done once.
+
+No central registry or service to update. Each person manages their own `peers.toml` via the pair command. `peerd list` on any machine shows that side's peer directory.
+
+---
+
+## Multi-session behavior (Mac with multiple terminals open)
+
+If you have multiple `claude` sessions open on one machine and a peer calls:
+
+- **Only the OLDEST subscribed session gets the popup.** Newer sessions stay completely silent (no popup, no chat block, no emoji).
+- The oldest is whichever session subscribed to peerd first — usually the one you opened first.
+- If that primary session is unresponsive/crashed, no popup appears anywhere. Recovery: `/exit` it (which unsubscribes); the next-oldest takes over.
+- macOS notification ring fires once per call regardless of session count.
+
+This is intentional — avoids "popup spam" across multiple sessions. If you want a different session to handle calls, close the older ones first.
+
+---
+
 ## What's on your machine after install
 
 ```
@@ -247,6 +271,21 @@ All six should print `PASS`.
 
 ---
 
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| `peerd: command not found` after `peerd init` | Open a NEW terminal (the alias is only loaded for newly-spawned shells). Or `source ~/.zshrc` / `~/.bashrc`. |
+| Claude Code launches without the `Listening for channel messages…` banner | The `claude` shell alias isn't loaded. Run `alias claude` — it should print the aliased command. If not, see row above. |
+| `peerd status` says daemon not running | macOS: `launchctl load ~/Library/LaunchAgents/com.peerd.daemon.plist`. Linux: `systemctl --user status peerd` + `journalctl --user -u peerd -n 50`. |
+| `peerd pair` says "remote not in pairing mode" | The other side must run `peerd ready` first; pairing window is 60s. |
+| `peerd list` shows peer as `—` (offline) | `tailscale ping <peer-hostname>` to verify tailnet reachability; check the peer's `peerd status`. |
+| Mac's tailscale not on PATH | `which tailscale` empty? The Mac App Store version puts the CLI in the .app bundle. Either install via `brew install --cask tailscale` (CLI auto-on-PATH) or manually add `/Applications/Tailscale.app/Contents/MacOS` to PATH. |
+| Lost peers / corrupted state | `peerd remove <name>` to drop a peer entry, or `rm ~/.claude/peerd/peers.toml` + re-run `peerd init` + re-pair. |
+| Live peer-mcp logs | `tail -f ~/.claude/peerd/peer-mcp-*.log` — every channel emit, every elicitation attempt, every error. |
+
+---
+
 ## Limitations
 
 - **MCP Channels is research preview** — Anthropic may change the protocol. The `--dangerously-load-development-channels` flag is required because we're not in Anthropic's plugin allowlist.
@@ -255,6 +294,7 @@ All six should print `PASS`.
 - **No `share_file` / `propose_change`** — defined in PROTOCOL.md but not yet wired. M3 work.
 - **One call per session** — concurrent calls not yet supported.
 - **`peer_accept_invite` is auto-approved on the callee side** — the user's accept gate is `AskUserQuestion`. If you don't want this, remove `mcp__peerd__peer_accept_invite` from `~/.claude/settings.json`'s `permissions.allow`.
+- **Multi-session popup goes to the OLDEST session** — see the section above. If that's the wrong one for you, close the older sessions or `/exit` them.
 
 ---
 
