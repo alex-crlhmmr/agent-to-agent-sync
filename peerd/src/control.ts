@@ -59,6 +59,7 @@ export class ControlServer {
   private server?: net.Server;
   private pendingInvites: Map<string, IncomingInvite> = new Map();
   private inviteSubscribers: Set<(inv: IncomingInvite) => void> = new Set();
+  private inviteResolvedSubscribers: Set<(evt: { call_id: string; resolution: "accepted" | "declined" | "ended" }) => void> = new Set();
 
   constructor(opts: ControlServerOptions) {
     this.socketPath = opts.socketPath;
@@ -92,13 +93,27 @@ export class ControlServer {
       });
     });
 
-    // Once accepted/denied, remove from pending list.
+    // Once accepted/denied/ended/timed-out: remove from pending list AND
+    // broadcast a resolution notification so every other peer-mcp subscribed
+    // can suppress / dismiss any popup it might be about to show.
     this.cm.on("connected", ({ call_id }: { call_id: string }) => {
-      this.pendingInvites.delete(call_id);
+      if (this.pendingInvites.has(call_id)) {
+        this.pendingInvites.delete(call_id);
+        this.broadcastInviteResolved(call_id, "accepted");
+      }
     });
     this.cm.on("ended", ({ call_id }: { call_id: string }) => {
-      this.pendingInvites.delete(call_id);
+      if (this.pendingInvites.has(call_id)) {
+        this.pendingInvites.delete(call_id);
+        this.broadcastInviteResolved(call_id, "ended");
+      }
     });
+  }
+
+  private broadcastInviteResolved(call_id: string, resolution: "accepted" | "declined" | "ended"): void {
+    for (const cb of this.inviteResolvedSubscribers) {
+      try { cb({ call_id, resolution }); } catch { /* ignore */ }
+    }
   }
 
   async start(): Promise<void> {
@@ -196,11 +211,18 @@ export class ControlServer {
         for (const inv of this.pendingInvites.values()) {
           hooks.writeNotification({ kind: "invite", payload: inv });
         }
-        const cb = (inv: IncomingInvite) => {
+        const inviteCb = (inv: IncomingInvite) => {
           hooks.writeNotification({ kind: "invite", payload: inv });
         };
-        this.inviteSubscribers.add(cb);
-        hooks.onClose(() => this.inviteSubscribers.delete(cb));
+        const resolvedCb = (evt: { call_id: string; resolution: "accepted" | "declined" | "ended" }) => {
+          hooks.writeNotification({ kind: "invite_resolved", payload: evt });
+        };
+        this.inviteSubscribers.add(inviteCb);
+        this.inviteResolvedSubscribers.add(resolvedCb);
+        hooks.onClose(() => {
+          this.inviteSubscribers.delete(inviteCb);
+          this.inviteResolvedSubscribers.delete(resolvedCb);
+        });
         return { subscribed: true };
       }
 

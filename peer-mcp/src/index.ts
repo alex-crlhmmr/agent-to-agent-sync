@@ -111,6 +111,7 @@ async function main() {
         "      * Accept → call mcp__peerd__peer_accept_invite with the call_id from the meta. Then handle the subsequent \"connected\" event by calling peer_recv.\n" +
         "      * Decline → call mcp__peerd__peer_deny_invite with the call_id.\n" +
         "      * Decline & send a message → ask the user for the message text (another AskUserQuestion or a text prompt), then call peer_deny_invite with `reason` set to that text.\n" +
+        "  - invite_cancelled: A call that you had received an `invite` for has been resolved in ANOTHER Claude Code session (the user accepted or declined there, or it timed out). If you have NOT yet called AskUserQuestion for this call_id, silently ignore — do not pop the question. If you already DID call AskUserQuestion, the popup remains open until the user presses Esc (Claude Code can't close popups externally); mention briefly in your next message that the call has been resolved elsewhere, then don't drive it.\n" +
         "  - connected: A call is now active. The caller has the floor. Call mcp__peerd__peer_recv immediately with the call_id to receive their opening message, then reason and call peer_send to reply. Continue the recv/send loop until either side calls peer_end (you'll see kind=\"ended\").\n" +
         "  - message:   A new message arrived on an active call. Call peer_recv to pull it.\n" +
         "  - ended:     The call ended. The agreement and action_items (if any) are in the meta. Report them briefly to the user.\n\n" +
@@ -321,27 +322,67 @@ async function startChannelBridge(server: McpServer, client: PeerdClient): Promi
 
   // Track which call_ids we've emitted "invite" for so we don't double-emit.
   const invitedSeen = new Set<string>();
+  // Track which call_ids have been resolved (accepted/declined elsewhere)
+  // BEFORE we got around to emitting them. We won't emit invites for these.
+  const resolvedBeforeEmit = new Set<string>();
 
-  // Subscribe to incoming invites and emit invite channel events.
+  // Subscribe to incoming invites + resolution events.
   client.subscribe("subscribe_inbox", {}, (n: unknown) => {
     const note = n as { kind?: string; payload?: any };
-    if (note?.kind !== "invite") return;
-    const inv = note.payload;
-    if (!inv?.call_id || invitedSeen.has(inv.call_id)) return;
-    invitedSeen.add(inv.call_id);
-    emitChannel(server, {
-      kind: "invite",
-      call_id: inv.call_id,
-      from: inv.from,
-      topic: inv.topic ?? "",
-      caller_label: inv.caller_label ?? "",
-      content:
-        `Incoming peer call from ${inv.from} (${inv.caller_label ?? "no label"}).\n` +
-        `Topic: ${inv.topic}\n` +
-        (inv.context_excerpt ? `Context: ${inv.context_excerpt}\n` : "") +
-        `Call ID: ${inv.call_id}\n\n` +
-        `The user will be asked to accept/decline via a popup. After they accept, you'll receive a "connected" channel event with the same call_id — that's when you should engage by calling mcp__peerd__peer_recv.`,
-    });
+
+    if (note?.kind === "invite") {
+      const inv = note.payload;
+      if (!inv?.call_id || invitedSeen.has(inv.call_id)) return;
+      // Race-guard: if peerd already told us this invite was resolved in another
+      // session, just suppress entirely — never emit anything.
+      if (resolvedBeforeEmit.has(inv.call_id)) {
+        resolvedBeforeEmit.delete(inv.call_id);
+        return;
+      }
+      invitedSeen.add(inv.call_id);
+      emitChannel(server, {
+        kind: "invite",
+        call_id: inv.call_id,
+        from: inv.from,
+        topic: inv.topic ?? "",
+        caller_label: inv.caller_label ?? "",
+        content:
+          `Incoming peer call from ${inv.from} (${inv.caller_label ?? "no label"}).\n` +
+          `Topic: ${inv.topic}\n` +
+          (inv.context_excerpt ? `Context: ${inv.context_excerpt}\n` : "") +
+          `Call ID: ${inv.call_id}\n\n` +
+          `The user will be asked to accept/decline via a popup. After they accept, you'll receive a "connected" channel event with the same call_id — that's when you should engage by calling mcp__peerd__peer_recv.`,
+      });
+      return;
+    }
+
+    if (note?.kind === "invite_resolved") {
+      const { call_id, resolution } = note.payload as { call_id: string; resolution: string };
+      if (!call_id) return;
+      if (invitedSeen.has(call_id)) {
+        // We already emitted the invite event in this session — push a
+        // cancellation block so the agent can abandon the popup logic if
+        // it hasn't already called AskUserQuestion. (If the popup is
+        // already open, only the user pressing Esc closes it — but at
+        // least the chat shows context for why.)
+        emitChannel(server, {
+          kind: "invite_cancelled",
+          call_id,
+          resolution,
+          content:
+            `Call ${call_id} was ${resolution === "accepted" ? "accepted in another session" : resolution === "declined" ? "declined elsewhere" : "ended/timed out"}.\n\n` +
+            `If you haven't yet called AskUserQuestion for this call, do NOT call it now — silently ignore. If you have, the user will need to press Esc to dismiss the popup (we can't close it externally).`,
+        });
+      } else {
+        // We haven't emitted the invite yet (race: resolution beat the
+        // invite notification through our subscriber). Mark so the next
+        // 'invite' notification for this call_id is suppressed.
+        resolvedBeforeEmit.add(call_id);
+        // Auto-expire after 10s so the set doesn't grow unbounded.
+        setTimeout(() => resolvedBeforeEmit.delete(call_id), 10_000).unref();
+      }
+      return;
+    }
   });
 
   // Poll for call-state changes (connected, message arrived, ended) every second.
