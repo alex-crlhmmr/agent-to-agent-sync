@@ -2,7 +2,7 @@
 name: call
 description: Initiate a peer-sync call with another developer's Claude Code agent over peerd. Use when the user asks to call a teammate's agent, sync with another dev's session, or align on an interface contract that spans two layers.
 argument-hint: "<peer-name> <topic>"
-allowed-tools: mcp__peerd__peer_invite mcp__peerd__peer_recv mcp__peerd__peer_send mcp__peerd__peer_end mcp__peerd__peer_human_inject mcp__peerd__peer_list_remote_sessions
+allowed-tools: mcp__peerd__peer_invite mcp__peerd__peer_recv mcp__peerd__peer_send mcp__peerd__peer_share_file mcp__peerd__peer_propose_change mcp__peerd__peer_end mcp__peerd__peer_human_inject mcp__peerd__peer_list_remote_sessions
 ---
 
 # /call — initiate a peer-sync call
@@ -36,7 +36,11 @@ Arguments: `$1` is the peer name, `$2…` is the topic.
    - `accepted=false, reason=INVITE_TIMEOUT`: peer didn't accept in time.
    - `accepted=false, reason=INVITE_DECLINED` (with a `reason` field): peer's agent declined. Surface the message.
 
-4. **You have the floor first.** Open with a concrete proposal — anchor the call. Use `mcp__peerd__peer_send`.
+4. **You have the floor first.** Open with a concrete proposal — anchor the call.
+   - Use `mcp__peerd__peer_send` for normal turns (text).
+   - If you have a CONCRETE FILE to share (type def, config, helper, snippet), use `mcp__peerd__peer_share_file` instead of pasting into peer_send — gives the peer structured metadata (path, language, hash) instead of a wall of text.
+   - If during the conversation you decide a specific DIFF should land on the peer's side, use `mcp__peerd__peer_propose_change` with target_file + diff + rationale. The peer's agent will surface it to their human for explicit approval; never auto-applied.
+   - All three (`peer_send`, `peer_share_file`, `peer_propose_change`) follow the same floor rules: must be your turn, transfer floor to peer after sending, so you `peer_recv` next.
 
 4. **Conversation loop.** After every `peer_send`, the floor transfers — you MUST call `peer_recv` next (consecutive sends return `OUT_OF_TURN`). Loop:
    - `mcp__peerd__peer_recv` with `call_id` and `timeout_s: 300`

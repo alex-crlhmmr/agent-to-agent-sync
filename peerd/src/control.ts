@@ -382,6 +382,36 @@ export class ControlServer {
         return await this.cm.send(cid, text);
       }
 
+      case "share_file": {
+        const cid = String(params.call_id ?? "");
+        const filePath = String(params.path ?? "");
+        const content = String(params.content ?? "");
+        if (!cid || !filePath) throw rpcError("INVALID_PARAMS", "call_id and path required");
+        return await this.cm.shareFile(cid, {
+          path: filePath,
+          content,
+          language: params.language as string | undefined,
+          reason: params.reason as string | undefined,
+        });
+      }
+
+      case "propose_change": {
+        const cid = String(params.call_id ?? "");
+        const target_file = String(params.target_file ?? "");
+        const diff = String(params.diff ?? "");
+        const rationale = String(params.rationale ?? "");
+        if (!cid || !target_file || !diff || !rationale) {
+          throw rpcError("INVALID_PARAMS", "call_id, target_file, diff, rationale all required");
+        }
+        return await this.cm.proposeChange(cid, {
+          target_file,
+          diff,
+          rationale,
+          requires_human_approval: params.requires_human_approval as boolean | undefined,
+          tests_added: params.tests_added as Array<{ path: string; diff: string }> | undefined,
+        });
+      }
+
       case "recv": {
         const cid = String(params.call_id ?? "");
         const timeoutS = Number(params.timeout_s ?? 60);

@@ -12,8 +12,11 @@ import {
   InviteResponsePayload,
   ListSessionsPayload,
   ListSessionsResponsePayload,
+  ProposeChangePayload,
   SendPayload,
   SessionInfo,
+  ShareFilePayload,
+  SHARE_FILE_MAX_BYTES,
 } from "./types.js";
 import { callId, nowIso, sessionToken } from "./ids.js";
 import { envelope, errorEnvelope } from "./wire.js";
@@ -64,10 +67,10 @@ export interface InviteEvent {
 
 export interface CallMessageEvent {
   call_id: string;
-  kind: "send" | "end" | "human_inject";
+  kind: "send" | "end" | "human_inject" | "file_shared" | "change_proposed";
   seq: number;
   from: string;
-  payload: SendPayload | EndPayload | HumanInjectPayload;
+  payload: SendPayload | EndPayload | HumanInjectPayload | ShareFilePayload | ProposeChangePayload;
 }
 
 /** In-flight LIST_SESSIONS request awaiting a response from a peer. */
@@ -241,6 +244,71 @@ export class CallManager extends EventEmitter {
     return { seq: call.seqOut };
   }
 
+  /**
+   * Send an inline file (small files only — hard cap 256 KiB).
+   * Same turn-lock rules as send(): must be your turn; transfers floor to peer.
+   */
+  async shareFile(call_id: string, opts: { path: string; content: string; language?: string; reason?: string }): Promise<{ seq: number; hash_sha256: string }> {
+    const call = this.expectConnectedCall(call_id);
+    const myFloor = call.isLocalCaller ? "caller" : "callee";
+    if (call.floor !== myFloor) throw new Error("OUT_OF_TURN");
+
+    const bytes = Buffer.byteLength(opts.content, "utf8");
+    if (bytes > SHARE_FILE_MAX_BYTES) {
+      throw new Error(`INLINE_TOO_LARGE: ${bytes} > ${SHARE_FILE_MAX_BYTES} bytes. Use share_file_ref (not yet implemented) for larger files.`);
+    }
+    const hash_sha256 = crypto.createHash("sha256").update(opts.content).digest("hex");
+    const payload: ShareFilePayload = {
+      path: opts.path,
+      content: opts.content,
+      language: opts.language,
+      reason: opts.reason,
+      hash_sha256,
+    };
+    const env = envelope<ShareFilePayload>("SHARE_FILE", this.selfName, payload, {
+      call_id,
+      seq: ++call.seqOut,
+    });
+    await this.appendTranscript(call, "out", env);
+    const conn = this.getConnection(call.remotePeerName);
+    if (!conn) throw new Error(`peer "${call.remotePeerName}" not connected`);
+    conn.send(env);
+    call.floor = call.isLocalCaller ? "callee" : "caller";
+    await this.persistMeta(call);
+    return { seq: call.seqOut, hash_sha256 };
+  }
+
+  /**
+   * Propose a change to the peer's local code. The diff is data — peerd does
+   * NOT apply it. The receiver's agent decides whether to call its own Edit
+   * tool, gated by Claude Code's normal permission flow.
+   * Turn-lock rules same as send().
+   */
+  async proposeChange(call_id: string, opts: { target_file: string; diff: string; rationale: string; requires_human_approval?: boolean; tests_added?: Array<{ path: string; diff: string }> }): Promise<{ seq: number }> {
+    const call = this.expectConnectedCall(call_id);
+    const myFloor = call.isLocalCaller ? "caller" : "callee";
+    if (call.floor !== myFloor) throw new Error("OUT_OF_TURN");
+
+    const payload: ProposeChangePayload = {
+      target_file: opts.target_file,
+      diff: opts.diff,
+      rationale: opts.rationale,
+      requires_human_approval: opts.requires_human_approval ?? true,
+      tests_added: opts.tests_added,
+    };
+    const env = envelope<ProposeChangePayload>("PROPOSE_CHANGE", this.selfName, payload, {
+      call_id,
+      seq: ++call.seqOut,
+    });
+    await this.appendTranscript(call, "out", env);
+    const conn = this.getConnection(call.remotePeerName);
+    if (!conn) throw new Error(`peer "${call.remotePeerName}" not connected`);
+    conn.send(env);
+    call.floor = call.isLocalCaller ? "callee" : "caller";
+    await this.persistMeta(call);
+    return { seq: call.seqOut };
+  }
+
   async humanInject(call_id: string, tag: string, text: string, priority?: "override" | "advisory"): Promise<{ seq: number }> {
     const call = this.expectActiveCall(call_id);
     const env = envelope<HumanInjectPayload>("HUMAN_INJECT", this.selfName, { tag, text, priority }, {
@@ -304,6 +372,16 @@ export class CallManager extends EventEmitter {
       case "SEND":
         if (!cid) return;
         await this.handleIncomingSend(conn, cid, env);
+        return;
+
+      case "SHARE_FILE":
+        if (!cid) return;
+        await this.handleIncomingShareFile(conn, cid, env);
+        return;
+
+      case "PROPOSE_CHANGE":
+        if (!cid) return;
+        await this.handleIncomingProposeChange(conn, cid, env);
         return;
 
       case "HUMAN_INJECT":
@@ -514,6 +592,56 @@ export class CallManager extends EventEmitter {
       seq: env.seq ?? 0,
       from: env.from,
       payload: env.payload as SendPayload,
+    };
+    this.emit("message", evt);
+  }
+
+  private async handleIncomingShareFile(conn: Connection, cid: string, env: Envelope): Promise<void> {
+    const call = this.calls.get(cid);
+    if (!call || call.state !== "CONNECTED") {
+      conn.send(errorEnvelope(this.selfName, ErrorCode.UNKNOWN_CALL, "no such connected call", { call_id: cid }));
+      return;
+    }
+    const senderRole = env.from === call.caller ? "caller" : "callee";
+    if (call.floor !== senderRole) {
+      conn.send(errorEnvelope(this.selfName, ErrorCode.OUT_OF_TURN, "floor mismatch", { call_id: cid, in_response_to_seq: env.seq }));
+      return;
+    }
+    await this.appendTranscript(call, "in", env);
+    call.floor = senderRole === "caller" ? "callee" : "caller";
+    call.seqIn = env.seq ?? call.seqIn;
+    await this.persistMeta(call);
+    const evt: CallMessageEvent = {
+      call_id: cid,
+      kind: "file_shared",
+      seq: env.seq ?? 0,
+      from: env.from,
+      payload: env.payload as ShareFilePayload,
+    };
+    this.emit("message", evt);
+  }
+
+  private async handleIncomingProposeChange(conn: Connection, cid: string, env: Envelope): Promise<void> {
+    const call = this.calls.get(cid);
+    if (!call || call.state !== "CONNECTED") {
+      conn.send(errorEnvelope(this.selfName, ErrorCode.UNKNOWN_CALL, "no such connected call", { call_id: cid }));
+      return;
+    }
+    const senderRole = env.from === call.caller ? "caller" : "callee";
+    if (call.floor !== senderRole) {
+      conn.send(errorEnvelope(this.selfName, ErrorCode.OUT_OF_TURN, "floor mismatch", { call_id: cid, in_response_to_seq: env.seq }));
+      return;
+    }
+    await this.appendTranscript(call, "in", env);
+    call.floor = senderRole === "caller" ? "callee" : "caller";
+    call.seqIn = env.seq ?? call.seqIn;
+    await this.persistMeta(call);
+    const evt: CallMessageEvent = {
+      call_id: cid,
+      kind: "change_proposed",
+      seq: env.seq ?? 0,
+      from: env.from,
+      payload: env.payload as ProposeChangePayload,
     };
     this.emit("message", evt);
   }

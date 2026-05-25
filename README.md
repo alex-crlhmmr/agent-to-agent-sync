@@ -270,9 +270,10 @@ npx tsx src/cmd/smoke-mcp.ts          # call driven through the MCP protocol
 npx tsx src/cmd/smoke-stop-hook.ts    # Stop hook + status line script
 npx tsx src/cmd/smoke-pair.ts         # zero-touch pairing (peerd ready / peerd pair)
 npx tsx src/cmd/smoke-opt-in.ts       # opt-in subscriber routing + session discovery
+npx tsx src/cmd/smoke-share.ts        # peer_share_file + peer_propose_change in-call
 ```
 
-All seven should print `PASS`.
+All eight should print `PASS`.
 
 ---
 
@@ -302,7 +303,7 @@ All seven should print `PASS`.
 - **MCP Channels is research preview** — Anthropic may change the protocol. The `--dangerously-load-development-channels` flag is required because we're not in Anthropic's plugin allowlist.
 - **No reconnect-with-replay** — a dropped WSS during a call ends the call. M5 work.
 - **No voicemail** — calls to an offline peer time out. M4 work.
-- **No `share_file` / `propose_change`** — defined in PROTOCOL.md but not yet wired. M3 work.
+- **`share_file_ref` (large files >256 KiB) + `fetch`** — defined in PROTOCOL.md, not yet wired. (`peer_share_file` for ≤256 KiB inline is shipped; `peer_propose_change` for cross-side diffs is shipped.)
 - **One call per session** — concurrent calls not yet supported.
 - **`peer_accept_invite` is auto-approved on the callee side** — the user's accept gate is `AskUserQuestion`. If you don't want this, remove `mcp__peerd__peer_accept_invite` from `~/.claude/settings.json`'s `permissions.allow`.
 - **Multi-session popup goes to the OLDEST session** — see the section above. If that's the wrong one for you, close the older sessions or `/exit` them.

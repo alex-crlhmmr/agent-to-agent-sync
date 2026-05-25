@@ -12,6 +12,8 @@ export type MessageType =
   | "INVITE"
   | "INVITE_RESPONSE"
   | "SEND"
+  | "SHARE_FILE"
+  | "PROPOSE_CHANGE"
   | "END"
   | "HUMAN_INJECT"
   | "ERROR"
@@ -65,6 +67,28 @@ export interface InviteResponsePayload {
 }
 
 export interface SendPayload { text: string; }
+
+/** Inline-file share — content carried directly. Hard cap 256 KiB per PROTOCOL.md §5.5.2. */
+export interface ShareFilePayload {
+  path: string;
+  content: string;
+  language?: string;
+  reason?: string;
+  hash_sha256: string;
+}
+
+/** Cross-side change proposal: "I propose YOUR side change like this." */
+export interface ProposeChangePayload {
+  target_file: string;
+  diff: string;
+  rationale: string;
+  /** Default true. If true, receiver should NOT apply without human OK. */
+  requires_human_approval?: boolean;
+  tests_added?: Array<{ path: string; diff: string }>;
+}
+
+/** Hard cap on inline file content (per PROTOCOL.md §5.5.2). */
+export const SHARE_FILE_MAX_BYTES = 256 * 1024;
 
 export interface EndPayload {
   reason:

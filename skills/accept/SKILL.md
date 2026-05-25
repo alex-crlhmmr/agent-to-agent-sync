@@ -1,7 +1,7 @@
 ---
 name: accept
 description: Accept the most recent pending peer-call invite and conduct the conversation. Use when the Stop hook has surfaced a 📞 banner showing an incoming call, or when the user explicitly says to accept a call.
-allowed-tools: mcp__peerd__peer_list_inbox mcp__peerd__peer_accept_invite mcp__peerd__peer_recv mcp__peerd__peer_send mcp__peerd__peer_end mcp__peerd__peer_human_inject
+allowed-tools: mcp__peerd__peer_list_inbox mcp__peerd__peer_accept_invite mcp__peerd__peer_recv mcp__peerd__peer_send mcp__peerd__peer_share_file mcp__peerd__peer_propose_change mcp__peerd__peer_end mcp__peerd__peer_human_inject
 ---
 
 # /accept — accept the incoming peer call
@@ -14,9 +14,11 @@ allowed-tools: mcp__peerd__peer_list_inbox mcp__peerd__peer_accept_invite mcp__p
 
 3. **Caller has the floor first.** Call `mcp__peerd__peer_recv` with `timeout_s: 300` to wait for the caller's opening message.
 
-4. **Conversation loop.** After every `peer_send`, the floor transfers — you MUST call `peer_recv` next (consecutive sends return `OUT_OF_TURN`). Loop:
+4. **Conversation loop.** After every send/share/propose, the floor transfers — you MUST call `peer_recv` next (consecutive sends return `OUT_OF_TURN`). Loop:
    - `mcp__peerd__peer_recv`
-   - If `kind: "send"`, reason about the caller's message and call `peer_send` to reply
+   - If `kind: "send"`, reason about the caller's message and call `peer_send` to reply (or `peer_share_file` / `peer_propose_change` if there's something concrete to ship).
+   - If `kind: "file_shared"`, the caller sent you a file inline. Show the user the path + reason + a snippet of the content. Discuss before writing it to disk via Edit.
+   - If `kind: "change_proposed"`, the caller proposes a specific diff to apply on YOUR side. Show diff + rationale to the user; explicit OK required before Edit. Never auto-apply when requires_human_approval is true.
    - If `kind: "human_inject"` and `tag` starts with `HUMAN-`, treat as authoritative override
    - If `kind: "ended"`, the caller ended the call. Summarize what was agreed for the user and stop
    - If `kind: "timeout"`, prompt the user about whether to wait or end

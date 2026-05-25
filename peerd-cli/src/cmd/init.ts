@@ -142,12 +142,19 @@ export async function cmdInit(args: string[]): Promise<number> {
     "mcp__peerd__peer_end",
     "mcp__peerd__peer_list_inbox",
     "mcp__peerd__peer_list_peers",
+    "mcp__peerd__peer_list_remote_sessions",
+    "mcp__peerd__peer_make_available",
+    "mcp__peerd__peer_unmake_available",
+    "mcp__peerd__peer_share_file",
+    "mcp__peerd__peer_propose_change",
     "mcp__peerd__peer_human_inject",
     "Skill(call)",
     "Skill(accept)",
     "Skill(deny)",
     "Skill(end-call)",
     "Skill(action-items)",
+    "Skill(make-available-for-call)",
+    "Skill(unavailable)",
   ]);
 
   settings.hooks = settings.hooks ?? {};

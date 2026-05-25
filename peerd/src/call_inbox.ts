@@ -5,7 +5,7 @@
 import { CallManager, CallMessageEvent } from "./call_manager.js";
 
 export type CallInboxEvent =
-  | { kind: "send" | "human_inject"; seq: number; from: string; payload: unknown }
+  | { kind: "send" | "human_inject" | "file_shared" | "change_proposed"; seq: number; from: string; payload: unknown }
   | { kind: "ended"; by: "local" | "remote"; payload?: unknown };
 
 interface Waiter {
