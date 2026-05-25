@@ -241,6 +241,19 @@ export class ControlServer {
         hooks.onClose(() => {
           this.inviteSubscribers.delete(inviteCb);
           this.inviteResolvedSubscribers.delete(resolvedCb);
+          // Hand-off: if the leaving subscriber was the primary (oldest) and there
+          // are still pending invites, the new oldest subscriber is now silently
+          // sitting on those invites (it received them marked silent earlier).
+          // Re-deliver pendingInvites to remaining subscribers with proper flags,
+          // so the now-oldest one pops a popup.
+          if (this.pendingInvites.size > 0 && this.inviteSubscribers.size > 0) {
+            const subs = Array.from(this.inviteSubscribers);
+            for (const inv of this.pendingInvites.values()) {
+              subs.forEach((cb, idx) => {
+                try { cb(inv, idx !== 0); } catch { /* ignore */ }
+              });
+            }
+          }
         });
         return { subscribed: true };
       }
