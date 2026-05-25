@@ -198,13 +198,22 @@ export async function cmdInit(args: string[]): Promise<number> {
     log(`  ✓ symlinked ${name}`);
   }
 
-  // ── 7. Shell alias ─────────────────────────────────────────────
+  // ── 7. Shell aliases ───────────────────────────────────────────
   log("");
-  log("step 6/7: shell alias for `claude`…");
+  log("step 6/7: shell aliases (claude + peerd)…");
   if (opts.noAlias) {
     log(`  - skipped (--no-alias)`);
   } else {
-    const aliasLine = `alias claude='claude --dangerously-load-development-channels server:peerd'`;
+    const peerdCliEntry = path.join(REPO_ROOT, "peerd-cli", "dist", "index.js");
+    const claudeAlias = `alias claude='claude --dangerously-load-development-channels server:peerd'`;
+    const peerdAlias = `alias peerd='node ${JSON.stringify(peerdCliEntry)}'`;
+    const block = [
+      "",
+      "# peerd aliases — added by 'peerd init'",
+      claudeAlias,
+      peerdAlias,
+      "",
+    ].join("\n");
     const rcCandidates = [
       path.join(HOME, ".zshrc"),
       path.join(HOME, ".bashrc"),
@@ -214,17 +223,32 @@ export async function cmdInit(args: string[]): Promise<number> {
     for (const rc of rcCandidates) {
       if (!fs.existsSync(rc)) continue;
       const cur = fs.readFileSync(rc, "utf8");
-      if (cur.includes(aliasLine) || cur.includes("# peerd alias")) {
-        log(`  ✓ alias already present in ${rc}`);
+      const hasClaudeAlias = cur.includes(claudeAlias);
+      const hasPeerdAlias = cur.includes(peerdAlias);
+
+      if (hasClaudeAlias && hasPeerdAlias) {
+        log(`  ✓ both aliases already present in ${rc}`);
         added = true;
         continue;
       }
-      fs.appendFileSync(rc, `\n# peerd alias\n${aliasLine}\n`);
-      log(`  + appended alias to ${rc}`);
+      // If the older single-alias block is there, just append the missing peerd alias
+      // after it; otherwise add the full block.
+      if (hasClaudeAlias && !hasPeerdAlias) {
+        fs.appendFileSync(rc, `\n${peerdAlias}\n`);
+        log(`  + appended peerd alias to ${rc} (claude alias already there)`);
+      } else if (!hasClaudeAlias && hasPeerdAlias) {
+        fs.appendFileSync(rc, `\n${claudeAlias}\n`);
+        log(`  + appended claude alias to ${rc} (peerd alias already there)`);
+      } else {
+        fs.appendFileSync(rc, block);
+        log(`  + appended claude + peerd aliases to ${rc}`);
+      }
       added = true;
     }
     if (!added) {
-      log(`  ! no shell rc found; add this line manually:\n      ${aliasLine}`);
+      log(`  ! no shell rc found; add these lines manually:`);
+      log(`      ${claudeAlias}`);
+      log(`      ${peerdAlias}`);
     }
   }
 
