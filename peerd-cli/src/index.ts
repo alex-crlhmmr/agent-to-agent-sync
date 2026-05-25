@@ -7,6 +7,7 @@ import { cmdList } from "./cmd/list.js";
 import { cmdStatus } from "./cmd/status.js";
 import { cmdRemove } from "./cmd/remove.js";
 import { cmdReady } from "./cmd/ready.js";
+import { cmdSessions } from "./cmd/sessions.js";
 
 const HELP = `peerd — agent-to-agent sync CLI
 
@@ -30,6 +31,11 @@ Usage:
 
   peerd list
       Show known peers + their online state.
+
+  peerd sessions
+      Show local claude sessions that are reachable for incoming calls
+      (i.e., ones that have run /make-available-for-call or launched with
+      PEERD_AVAILABLE set).
 
   peerd status
       Show daemon health, TLS fingerprint, active calls.
@@ -58,9 +64,10 @@ async function main(argv: string[]): Promise<number> {
       case "init":    return await cmdInit(rest);
       case "ready":   return await cmdReady(rest);
       case "pair":    return await cmdPair(rest);
-      case "list":    return await cmdList(rest);
-      case "status":  return await cmdStatus(rest);
-      case "remove":  return await cmdRemove(rest);
+      case "list":     return await cmdList(rest);
+      case "sessions": return await cmdSessions(rest);
+      case "status":   return await cmdStatus(rest);
+      case "remove":   return await cmdRemove(rest);
       default:
         console.error(`peerd: unknown command "${cmd}". Try 'peerd help'.`);
         return 2;
