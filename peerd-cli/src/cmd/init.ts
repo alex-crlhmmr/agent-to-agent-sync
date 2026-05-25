@@ -390,7 +390,11 @@ Type=simple
 WorkingDirectory=${REPO_ROOT}
 ExecStart=${nodeBin} ${peerdEntry}
 Restart=always
-RestartSec=5
+RestartSec=2
+# If peerd doesn't exit within 3s of SIGTERM (it should — see SIGTERM handler),
+# systemd sends SIGKILL. Prevents systemctl restart from hanging.
+TimeoutStopSec=3
+KillMode=mixed
 StandardOutput=append:${path.join(stateDir, "peerd.log")}
 StandardError=append:${path.join(stateDir, "peerd.err.log")}
 Environment=PATH=${nodeDir}:/usr/local/bin:/usr/bin:/bin

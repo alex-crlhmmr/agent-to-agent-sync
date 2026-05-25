@@ -108,12 +108,34 @@ async function main() {
     void maintainOutbound(config.self, name, config, connections, callManager);
   }
 
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) {
+      // Second signal — give up on graceful, just exit.
+      console.log("[peerd] forced exit");
+      process.exit(1);
+    }
+    shuttingDown = true;
     console.log("[peerd] shutting down");
-    for (const c of connections.values()) c.close(1000, "shutdown");
-    await controlServer.stop();
-    await peerServer.stop();
-    process.exit(0);
+    // Hard deadline: if graceful shutdown takes >2s, force exit.
+    // systemd/launchctl restart should be near-instant; never block on
+    // half-closed sockets.
+    const killer = setTimeout(() => {
+      console.log("[peerd] shutdown deadline exceeded, force-exiting");
+      process.exit(1);
+    }, 2000);
+    try {
+      for (const c of connections.values()) {
+        try { c.close(1000, "shutdown"); } catch { /* ignore */ }
+      }
+      await Promise.all([
+        controlServer.stop().catch(() => {}),
+        peerServer.stop().catch(() => {}),
+      ]);
+    } finally {
+      clearTimeout(killer);
+      process.exit(0);
+    }
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

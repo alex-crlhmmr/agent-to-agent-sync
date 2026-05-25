@@ -227,8 +227,20 @@ export class PeerServer extends EventEmitter {
   }
 
   async stop(): Promise<void> {
-    this.wss?.close();
-    await new Promise<void>((resolve) => this.httpsServer?.close(() => resolve()));
+    // Force-close active WS connections so we don't block waiting for them.
+    // (httpsServer.close() only waits for idle close; persistent WSS sessions
+    // from peer daemons would hold it open until TCP keepalive — 60-90s — kills
+    // them. We don't care: we want to exit fast.)
+    if (this.wss) {
+      for (const ws of this.wss.clients) {
+        try { ws.terminate(); } catch { /* ignore */ }
+      }
+      this.wss.close();
+    }
+    if (this.httpsServer) {
+      this.httpsServer.closeAllConnections?.();
+      await new Promise<void>((resolve) => this.httpsServer!.close(() => resolve()));
+    }
   }
 }
 
