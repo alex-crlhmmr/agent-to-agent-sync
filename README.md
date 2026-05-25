@@ -78,43 +78,62 @@ npm install && npm run build
 ### Step 2 — configure peerd on each machine
 
 ```bash
-# Same command on macOS and Linux:
-npm exec peerd init --name <your-name> --autostart
+# Same command on macOS and Linux. The `--` after `peerd` is REQUIRED;
+# without it, npm strips the script's flags before the CLI sees them
+# (you'll see warnings like "Unknown cli config '--name'").
+npm exec peerd -- init --name <your-name> --autostart
 ```
+
+> **First-run only.** If you re-run `peerd init` later, it sees the existing `peers.toml` and **does not** overwrite the `self = "..."` line. If you need a different name, `rm ~/.claude/peerd/peers.toml` first, then re-run init.
 
 `peerd init`:
 - Generates a TLS keypair at `~/.claude/peerd/tls/`.
 - Wires `~/.claude/settings.json` (hooks, status line, permissions for peerd MCP tools + skills).
 - Registers peerd as a user-scoped MCP server in `~/.claude.json`.
 - Symlinks the skills into `~/.claude/skills/`.
-- Appends a `claude` shell alias (adds the `--dangerously-load-development-channels server:peerd` flag automatically).
-- With `--autostart`, installs an auto-restart service that brings peerd up at login: **LaunchAgent** on macOS, **systemd user unit** on Linux. Both auto-restart peerd on crash. On Linux, also run `sudo loginctl enable-linger $USER` once if you want peerd to keep running after you log out.
+- Appends a `claude` shell alias to your `.zshrc` / `.bashrc` / `.bash_profile` (whichever exist). The alias adds `--dangerously-load-development-channels server:peerd` automatically.
+- With `--autostart`, installs an auto-restart service that brings peerd up at login: **LaunchAgent** on macOS, **systemd user unit** on Linux. Both auto-restart peerd on crash.
 
 It prints your **peer name**, **reachable-at hostname**, and **TLS fingerprint** — you don't need to share those manually; pairing handles it.
+
+#### On Ubuntu, also enable linger (one-time, optional)
+
+If you want peerd to keep running after you log out of the desktop session:
+```bash
+sudo loginctl enable-linger $USER
+```
+Without this, the systemd user units shut down when your last session ends — peerd would only run while you're logged in.
 
 ### Step 3 — start peerd
 
 ```bash
 # With --autostart, peerd is already running. Verify:
-peerd status
+npm exec peerd status
+# → daemon: ✔ running
 
-# Without --autostart: start manually whenever you want to be reachable
+# Without --autostart, start manually whenever you want to be reachable:
 npm run peerd
+```
+
+If status says `daemon: ✘ not running` and you used `--autostart` on Linux:
+```bash
+systemctl --user status peerd          # see why it failed
+journalctl --user -u peerd -n 50       # logs
 ```
 
 ### Step 4 — pair (once per teammate, ever)
 
-Coordinate so you both hit Enter within ~60s of each other.
+Coordinate so you both hit Enter within ~60s of each other. Both sides need to be logged in and have peerd running.
 
 **Receiver (your teammate, "bob"):**
 ```bash
-peerd ready
+npm exec peerd -- ready
 ```
 
 **Initiator (you):**
 ```bash
-peerd pair <bob's-tailscale-hostname>
-# e.g.  peerd pair bob-mac.tailnet-name.ts.net
+npm exec peerd -- pair <bob's-tailscale-hostname>
+# e.g.  npm exec peerd -- pair bob-mac.tailnet-name.ts.net
 ```
 
 Both sides print:
@@ -126,15 +145,36 @@ Tokens + fingerprints + both `peers.toml` files are exchanged and written automa
 
 Verify:
 ```bash
-peerd list
+npm exec peerd list
 # → bob   bob-mac.tailnet-name.ts.net   ✔
 ```
 
 ### Step 5 — daily use
 
-Open a **new terminal** (so the shell alias added by `peerd init` is in scope):
+**Open a new terminal** (so the `claude` shell alias added by `peerd init` is in scope) and just run:
 ```bash
 claude
+```
+
+You should see at launch:
+```
+Listening for channel messages from: server:peerd
+Experimental · inbound messages will be pushed into this session…
+```
+
+If you don't see that line, the alias isn't loaded — either you're using an existing terminal (open a new one) or your shell config doesn't auto-source. Quick fix in the current shell:
+```bash
+source ~/.zshrc   # or ~/.bashrc on bash
+alias claude      # should print: claude='claude --dangerously-load-development-channels server:peerd'
+```
+
+As a one-off override (no alias needed):
+```bash
+claude --dangerously-load-development-channels server:peerd
+```
+
+Then in chat:
+```
 > call bob about the User schema
 ```
 
