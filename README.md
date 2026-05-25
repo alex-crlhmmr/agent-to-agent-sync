@@ -156,6 +156,12 @@ npm exec peerd list
 claude
 ```
 
+By default a new claude session is **NOT reachable** by callers. To opt in this session for incoming calls:
+```
+> /make-available-for-call work
+```
+(label is optional — caller's session-picker will show it). The session stays reachable until `/unavailable` is run or claude exits. To open every session as reachable automatically, prefix the launch with `PEERD_AVAILABLE=1 claude` (or `PEERD_AVAILABLE=work claude` for a label).
+
 You should see at launch:
 ```
 Listening for channel messages from: server:peerd
@@ -191,16 +197,17 @@ No central registry or service to update. Each person manages their own `peers.t
 
 ---
 
-## Multi-session behavior (Mac with multiple terminals open)
+## Multi-session behavior (one machine, multiple claude sessions)
 
-If you have multiple `claude` sessions open on one machine and a peer calls:
+Sessions are **opt-in to receive**. A new session is silent until the user runs `/make-available-for-call` (or `PEERD_AVAILABLE=1 claude` at launch).
 
-- **Only the OLDEST subscribed session gets the popup.** Newer sessions stay completely silent (no popup, no chat block, no emoji).
-- The oldest is whichever session subscribed to peerd first — usually the one you opened first.
-- If that primary session is unresponsive/crashed, no popup appears anywhere. Recovery: `/exit` it (which unsubscribes); the next-oldest takes over.
-- macOS notification ring fires once per call regardless of session count.
+When a peer calls, default routing is:
+- **Caller may target a specific session** via the picker — `peer_invite` is preceded by `peer_list_remote_sessions`. If 2+ sessions are available, the user picks; if 1, auto-routes; if 0, fails fast.
+- **If caller doesn't target**, the **newest** opted-in session gets the popup. Older opted-in sessions stay silent.
+- macOS notification ring fires once per invite.
+- A session that ran `/unavailable` (or never opted in) is invisible to callers.
 
-This is intentional — avoids "popup spam" across multiple sessions. If you want a different session to handle calls, close the older ones first.
+To take over an active call from another session, you can't easily — the call is bound to the session that accepted. For invites still ringing, `/exit`ing the session that has the popup hands off to whoever's now-newest.
 
 ---
 
@@ -241,11 +248,13 @@ After `peerd init`, the following are available in any Claude Code session:
 
 | | |
 |---|---|
-| `/call <peer> <topic>` | initiate a call |
-| `/accept`              | accept the most-recent pending invite (rarely needed — the channel popup handles it) |
+| `/make-available-for-call [label]` | opt THIS session in to receive incoming calls (label is optional, shown to callers in picker) |
+| `/unavailable`         | opt this session out |
+| `/call <peer> <topic>` | initiate a call (will list & pick a target session on the peer) |
+| `/accept`              | accept the most-recent pending invite (rarely needed — popup handles it) |
 | `/deny [reason]`       | decline |
 | `/end-call`            | hang up with structured agreement |
-| `/action-items [call-id]` | pull a past call's artifacts back into the current session context |
+| `/action-items [call-id]` | pull a past call's artifacts back into context |
 
 ---
 
@@ -259,9 +268,10 @@ npx tsx src/cmd/smoke-control.ts      # call driven through the Unix control soc
 npx tsx src/cmd/smoke-mcp.ts          # call driven through the MCP protocol
 npx tsx src/cmd/smoke-stop-hook.ts    # Stop hook + status line script
 npx tsx src/cmd/smoke-pair.ts         # zero-touch pairing (peerd ready / peerd pair)
+npx tsx src/cmd/smoke-opt-in.ts       # opt-in subscriber routing + session discovery
 ```
 
-All six should print `PASS`.
+All seven should print `PASS`.
 
 ---
 

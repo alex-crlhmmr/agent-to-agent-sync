@@ -10,18 +10,33 @@ import {
   HumanInjectPayload,
   InvitePayload,
   InviteResponsePayload,
+  ListSessionsPayload,
+  ListSessionsResponsePayload,
   SendPayload,
+  SessionInfo,
 } from "./types.js";
 import { callId, nowIso, sessionToken } from "./ids.js";
 import { envelope, errorEnvelope } from "./wire.js";
+import * as crypto from "node:crypto";
 
 const INVITE_TIMEOUT_MS_DEFAULT = 150_000; // 2.5 minutes — overridable per call via invite opts
+
+export interface LocalSubscriberSnapshot {
+  id: string;
+  label?: string;
+  cwd?: string;
+  subscribed_at: number;
+}
 
 export interface CallManagerOptions {
   selfName: string;
   stateDir: string;
   /** Look up the active Connection to a peer by peer name. */
   getConnection: (peerName: string) => Connection | undefined;
+  /** Optional: snapshot of locally-available subscribers (only set after ControlServer is wired). */
+  listLocalAvailable?: () => LocalSubscriberSnapshot[];
+  /** Optional: is this local subscriber ID currently available? */
+  isLocalSubscriberAvailable?: (id: string) => boolean;
 }
 
 interface PendingInvite {
@@ -43,6 +58,8 @@ export interface InviteEvent {
   topic: string;
   caller_label: string;
   context_excerpt?: string;
+  /** If set by remote caller, route popup ONLY to this subscriber. */
+  target_subscriber_id?: string;
 }
 
 export interface CallMessageEvent {
@@ -53,18 +70,39 @@ export interface CallMessageEvent {
   payload: SendPayload | EndPayload | HumanInjectPayload;
 }
 
+/** In-flight LIST_SESSIONS request awaiting a response from a peer. */
+interface PendingListSessions {
+  resolve: (sessions: SessionInfo[]) => void;
+  reject: (err: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
 export class CallManager extends EventEmitter {
   private selfName: string;
   private stateDir: string;
   private getConnection: (peerName: string) => Connection | undefined;
+  private listLocalAvailable?: () => LocalSubscriberSnapshot[];
+  private isLocalSubscriberAvailable?: (id: string) => boolean;
   private calls: Map<string, CallRecord> = new Map();
   private pending: Map<string, PendingInvite> = new Map();
+  private pendingListSessions: Map<string, PendingListSessions> = new Map();
 
   constructor(opts: CallManagerOptions) {
     super();
     this.selfName = opts.selfName;
     this.stateDir = opts.stateDir;
     this.getConnection = opts.getConnection;
+    this.listLocalAvailable = opts.listLocalAvailable;
+    this.isLocalSubscriberAvailable = opts.isLocalSubscriberAvailable;
+  }
+
+  /** Inject the ControlServer-backed helpers post-construction (resolves circular dep). */
+  setSubscriberAccessors(opts: {
+    listLocalAvailable: () => LocalSubscriberSnapshot[];
+    isLocalSubscriberAvailable: (id: string) => boolean;
+  }): void {
+    this.listLocalAvailable = opts.listLocalAvailable;
+    this.isLocalSubscriberAvailable = opts.isLocalSubscriberAvailable;
   }
 
   attachConnection(conn: Connection): void {
@@ -81,7 +119,7 @@ export class CallManager extends EventEmitter {
 
   // ──────────────────────────── outgoing API ────────────────────────────
 
-  async invite(peerName: string, topic: string, opts: { caller_label?: string; context_excerpt?: string; first_floor?: "caller" | "callee"; invite_timeout_ms?: number } = {}): Promise<InviteResolution> {
+  async invite(peerName: string, topic: string, opts: { caller_label?: string; context_excerpt?: string; first_floor?: "caller" | "callee"; invite_timeout_ms?: number; target_subscriber_id?: string } = {}): Promise<InviteResolution> {
     const inviteTimeoutMs = Math.max(5_000, Math.min(600_000, opts.invite_timeout_ms ?? INVITE_TIMEOUT_MS_DEFAULT));
     const conn = this.getConnection(peerName);
     if (!conn) throw new Error(`peer "${peerName}" not connected`);
@@ -115,6 +153,7 @@ export class CallManager extends EventEmitter {
       first_floor: opts.first_floor ?? "caller",
       context_excerpt: opts.context_excerpt,
       expires_at: new Date(Date.now() + inviteTimeoutMs).toISOString(),
+      target_subscriber_id: opts.target_subscriber_id,
     };
 
     const env = envelope<InvitePayload>("INVITE", this.selfName, payload, {
@@ -282,9 +321,60 @@ export class CallManager extends EventEmitter {
         this.emit("peer_error", { call_id: cid, ...(env.payload as object) });
         return;
 
+      case "LIST_SESSIONS": {
+        const p = env.payload as ListSessionsPayload;
+        const available = this.listLocalAvailable?.() ?? [];
+        if (process.env.PEERD_DEBUG_SUBS) console.error(`[cm] LIST_SESSIONS inbound; have ${available.length} available`);
+        const respPayload: ListSessionsResponsePayload = {
+          request_id: p.request_id,
+          sessions: available.map((s) => ({
+            id: s.id,
+            label: s.label,
+            cwd: s.cwd,
+            subscribed_at: new Date(s.subscribed_at).toISOString(),
+          })),
+        };
+        const respEnv = envelope<ListSessionsResponsePayload>("LIST_SESSIONS_RESPONSE", this.selfName, respPayload);
+        try { conn.send(respEnv); } catch { /* ignore */ }
+        return;
+      }
+
+      case "LIST_SESSIONS_RESPONSE": {
+        const p = env.payload as ListSessionsResponsePayload;
+        if (process.env.PEERD_DEBUG_SUBS) console.error(`[cm] LIST_SESSIONS_RESPONSE for request ${p.request_id}: ${p.sessions.length} sessions`);
+        const pending = this.pendingListSessions.get(p.request_id);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingListSessions.delete(p.request_id);
+          pending.resolve(p.sessions);
+        }
+        return;
+      }
+
       default:
         return;
     }
+  }
+
+  /** Send LIST_SESSIONS to a peer and await its response (up to timeoutMs). */
+  async listRemoteSessions(peerName: string, timeoutMs: number = 5000): Promise<SessionInfo[]> {
+    const conn = this.getConnection(peerName);
+    if (!conn) throw new Error(`peer "${peerName}" not connected`);
+    const request_id = "lr_" + crypto.randomBytes(8).toString("hex");
+    const env = envelope<ListSessionsPayload>("LIST_SESSIONS", this.selfName, { request_id });
+    if (process.env.PEERD_DEBUG_SUBS) console.error(`[cm] listRemoteSessions: sending LIST_SESSIONS request_id=${request_id} to ${peerName}`);
+    return new Promise<SessionInfo[]>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingListSessions.delete(request_id);
+        reject(new Error("list_remote_sessions timeout"));
+      }, timeoutMs);
+      this.pendingListSessions.set(request_id, { resolve, reject, timer });
+      try { conn.send(env); } catch (e) {
+        clearTimeout(timer);
+        this.pendingListSessions.delete(request_id);
+        reject(e as Error);
+      }
+    });
   }
 
   private async handleIncomingInvite(conn: Connection, env: Envelope): Promise<void> {
@@ -298,6 +388,33 @@ export class CallManager extends EventEmitter {
       conn.send(errorEnvelope(this.selfName, ErrorCode.INVALID_MESSAGE, "duplicate call_id", { call_id: cid }));
       return;
     }
+
+    // Opt-in gate. Before we even materialize a RINGING call, reject if no
+    // available session can take it.
+    if (p.target_subscriber_id) {
+      const ok = this.isLocalSubscriberAvailable?.(p.target_subscriber_id) ?? false;
+      if (!ok) {
+        await this.appendStandaloneTranscript(cid, env);
+        const respEnv = envelope<InviteResponsePayload>("INVITE_RESPONSE", this.selfName, {
+          accepted: false,
+          reason: ErrorCode.NO_SUCH_SESSION,
+        }, { call_id: cid });
+        try { conn.send(respEnv); } catch { /* ignore */ }
+        return;
+      }
+    } else {
+      const available = this.listLocalAvailable?.() ?? [];
+      if (available.length === 0) {
+        await this.appendStandaloneTranscript(cid, env);
+        const respEnv = envelope<InviteResponsePayload>("INVITE_RESPONSE", this.selfName, {
+          accepted: false,
+          reason: ErrorCode.NO_AVAILABLE_SESSIONS,
+        }, { call_id: cid });
+        try { conn.send(respEnv); } catch { /* ignore */ }
+        return;
+      }
+    }
+
     const transcriptDir = path.join(this.stateDir, "calls", cid);
     await fs.promises.mkdir(transcriptDir, { recursive: true });
     const call: CallRecord = {
@@ -324,8 +441,20 @@ export class CallManager extends EventEmitter {
       topic: p.topic,
       caller_label: p.caller_label,
       context_excerpt: p.context_excerpt,
+      target_subscriber_id: p.target_subscriber_id,
     };
     this.emit("invite", evt);
+  }
+
+  /** For fast-reject paths where we don't materialize a CallRecord. Logs the inbound INVITE
+   *  to a one-off transcript so the rejection is auditable. */
+  private async appendStandaloneTranscript(cid: string, env: Envelope): Promise<void> {
+    const dir = path.join(this.stateDir, "calls", cid);
+    try {
+      await fs.promises.mkdir(dir, { recursive: true });
+      const line = JSON.stringify({ dir: "in_rejected", recorded_at: nowIso(), env }) + "\n";
+      await fs.promises.appendFile(path.join(dir, "transcript.jsonl"), line);
+    } catch { /* best-effort */ }
   }
 
   private async handleInviteResponse(cid: string, env: Envelope): Promise<void> {

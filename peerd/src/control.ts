@@ -3,6 +3,7 @@
 
 import * as net from "node:net";
 import * as fs from "node:fs";
+import * as crypto from "node:crypto";
 import * as readline from "node:readline";
 import { CallManager, InviteEvent } from "./call_manager.js";
 import { CallInbox } from "./call_inbox.js";
@@ -45,6 +46,23 @@ export interface ControlServerOptions {
   getSelfInfo?: () => { name: string; port: number; fingerprint: string };
 }
 
+/** Per-subscription state used for opt-in routing and discovery. */
+export interface SubscriberInfo {
+  subscriber_id: string;
+  /** When this subscription was added (epoch ms). */
+  subscribed_at: number;
+  /** false (default) = invites are NEVER routed to this subscriber. */
+  available: boolean;
+  /** Optional human-readable label set via set_session_metadata. */
+  label?: string;
+  /** Optional cwd of the originating claude session. */
+  cwd?: string;
+  /** Callback used to deliver invite events; silent=true means no popup. */
+  inviteCb: (inv: IncomingInvite, silent: boolean) => void;
+  /** Callback for invite_resolved events (so popups dismiss cleanly). */
+  resolvedCb: (evt: { call_id: string; resolution: "accepted" | "declined" | "ended" }) => void;
+}
+
 export class ControlServer {
   private socketPath: string;
   private cm: CallManager;
@@ -58,8 +76,9 @@ export class ControlServer {
   private getSelfInfo?: ControlServerOptions["getSelfInfo"];
   private server?: net.Server;
   private pendingInvites: Map<string, IncomingInvite> = new Map();
-  private inviteSubscribers: Set<(inv: IncomingInvite, silent: boolean) => void> = new Set();
-  private inviteResolvedSubscribers: Set<(evt: { call_id: string; resolution: "accepted" | "declined" | "ended" }) => void> = new Set();
+  // New: ordered Map of subscriber_id → SubscriberInfo. Insertion order
+  // preserved so "newest subscriber wins" + ownership checks remain stable.
+  private subscribers: Map<string, SubscriberInfo> = new Map();
 
   constructor(opts: ControlServerOptions) {
     this.socketPath = opts.socketPath;
@@ -73,7 +92,7 @@ export class ControlServer {
     this.getSelfInfo = opts.getSelfInfo;
     this.inbox = new CallInbox(this.cm);
 
-    this.cm.on("invite", (inv: InviteEvent) => {
+    this.cm.on("invite", (inv: InviteEvent & { target_subscriber_id?: string }) => {
       const stored: IncomingInvite = {
         call_id: inv.call_id,
         from: inv.from,
@@ -83,15 +102,7 @@ export class ControlServer {
         received_at: new Date().toISOString(),
       };
       this.pendingInvites.set(inv.call_id, stored);
-      // Only the NEWEST (most recently subscribed) session gets a non-silent
-      // popup. All older sessions receive the invite marked `silent: true`
-      // so they don't pop a UI. Maps to "the claude I just opened is the one
-      // I'm at the keyboard for."
-      const subs = Array.from(this.inviteSubscribers);
-      subs.forEach((cb, idx) => {
-        const isNewest = idx === subs.length - 1;
-        try { cb(stored, !isNewest); } catch { /* ignore */ }
-      });
+      this.dispatchInviteToSubscribers(stored, inv.target_subscriber_id);
       notify({
         title: `📞 ${inv.from}@${inv.caller_label}`,
         subtitle: inv.topic,
@@ -116,9 +127,56 @@ export class ControlServer {
     });
   }
 
+  /**
+   * Dispatch an invite to subscribers per the routing rules:
+   *   - If target_subscriber_id given: deliver ONLY to that subscriber
+   *     (non-silent). Other subscribers get nothing. The targeted subscriber
+   *     must currently be available, otherwise the call has already failed
+   *     at the wire level and we never reach this code path.
+   *   - Otherwise: deliver to all AVAILABLE subscribers. The newest available
+   *     gets non-silent (popup); all older available subscribers get silent.
+   *     Unavailable subscribers get nothing.
+   */
+  private dispatchInviteToSubscribers(inv: IncomingInvite, targetSubscriberId?: string): void {
+    if (targetSubscriberId) {
+      const sub = this.subscribers.get(targetSubscriberId);
+      if (sub && sub.available) {
+        try { sub.inviteCb(inv, false); } catch { /* ignore */ }
+      }
+      return;
+    }
+    const availableSubs: SubscriberInfo[] = [];
+    for (const s of this.subscribers.values()) if (s.available) availableSubs.push(s);
+    availableSubs.forEach((s, idx) => {
+      const isNewest = idx === availableSubs.length - 1;
+      try { s.inviteCb(inv, !isNewest); } catch { /* ignore */ }
+    });
+  }
+
+  /** Snapshot of currently-available subscribers, for list_sessions. */
+  listAvailableSessions(): Array<{ id: string; label?: string; cwd?: string; subscribed_at: number }> {
+    const out: Array<{ id: string; label?: string; cwd?: string; subscribed_at: number }> = [];
+    for (const s of this.subscribers.values()) {
+      if (!s.available) continue;
+      out.push({ id: s.subscriber_id, label: s.label, cwd: s.cwd, subscribed_at: s.subscribed_at });
+    }
+    if (process.env.PEERD_DEBUG_SUBS) console.error(`[peerd] listAvailableSessions: ${out.length}/${this.subscribers.size} available`);
+    return out;
+  }
+
+  /** Lookup subscriber metadata by id; used by CallManager to validate targets. */
+  getSubscriber(id: string): SubscriberInfo | undefined {
+    return this.subscribers.get(id);
+  }
+
+  hasAvailableSubscribers(): boolean {
+    for (const s of this.subscribers.values()) if (s.available) return true;
+    return false;
+  }
+
   private broadcastInviteResolved(call_id: string, resolution: "accepted" | "declined" | "ended"): void {
-    for (const cb of this.inviteResolvedSubscribers) {
-      try { cb({ call_id, resolution }); } catch { /* ignore */ }
+    for (const sub of this.subscribers.values()) {
+      try { sub.resolvedCb({ call_id, resolution }); } catch { /* ignore */ }
     }
   }
 
@@ -213,49 +271,78 @@ export class ControlServer {
       }
 
       case "subscribe_inbox": {
-        // Stream notifications for new invites until the client disconnects.
-        // For REPLAY (invites pending before this subscriber connected): a
-        // newly-opening session is the freshest, so it gets a NON-silent popup.
-        // Older sessions that already received the invite either still have
-        // their popup open (can't close it from MCP — user Escs) or already
-        // dismissed it. Either way: the user just opened a new claude, so
-        // route the popup there.
-        for (const inv of this.pendingInvites.values()) {
-          hooks.writeNotification({
-            kind: "invite",
-            payload: inv,
-            silent: false,
-          });
-        }
-        // Fresh invites: callback receives a `silent` flag determined by the
-        // dispatch loop in cm.on("invite") — only the first/oldest subscriber
-        // gets silent=false.
+        // Register this connection as a subscriber. Default: available=false.
+        // The peer-mcp must call set_session_metadata({ available: true, ... })
+        // to become routable. Until then, no invites are routed to it.
+        const subscriber_id = "s_" + crypto.randomBytes(8).toString("hex");
+        const subscribed_at = Date.now();
+
         const inviteCb = (inv: IncomingInvite, silent: boolean) => {
           hooks.writeNotification({ kind: "invite", payload: inv, silent });
         };
         const resolvedCb = (evt: { call_id: string; resolution: "accepted" | "declined" | "ended" }) => {
           hooks.writeNotification({ kind: "invite_resolved", payload: evt });
         };
-        this.inviteSubscribers.add(inviteCb);
-        this.inviteResolvedSubscribers.add(resolvedCb);
+
+        const info: SubscriberInfo = {
+          subscriber_id,
+          subscribed_at,
+          available: false,
+          inviteCb,
+          resolvedCb,
+        };
+        this.subscribers.set(subscriber_id, info);
+
+        // First notification a subscriber receives is its own ID so it can
+        // pass that back via set_session_metadata. Then any replayed pending
+        // invites (only non-silently if this subscription is available — which
+        // it isn't yet at this point, so they're skipped). The subscriber will
+        // typically call set_session_metadata immediately after subscribing.
+        hooks.writeNotification({ kind: "subscribed", payload: { subscriber_id } });
+
         hooks.onClose(() => {
-          this.inviteSubscribers.delete(inviteCb);
-          this.inviteResolvedSubscribers.delete(resolvedCb);
-          // Hand-off: if the leaving subscriber was the primary (oldest) and there
-          // are still pending invites, the new oldest subscriber is now silently
-          // sitting on those invites (it received them marked silent earlier).
-          // Re-deliver pendingInvites to remaining subscribers with proper flags,
-          // so the now-oldest one pops a popup.
-          if (this.pendingInvites.size > 0 && this.inviteSubscribers.size > 0) {
-            const subs = Array.from(this.inviteSubscribers);
+          this.subscribers.delete(subscriber_id);
+          // If a pending invite was waiting for the popup on this (just-left)
+          // subscriber, dispatch it to any remaining available subscribers.
+          if (this.pendingInvites.size > 0 && this.hasAvailableSubscribers()) {
             for (const inv of this.pendingInvites.values()) {
-              subs.forEach((cb, idx) => {
-                try { cb(inv, idx !== 0); } catch { /* ignore */ }
-              });
+              this.dispatchInviteToSubscribers(inv);
             }
           }
         });
-        return { subscribed: true };
+        return { subscribed: true, subscriber_id };
+      }
+
+      case "set_session_metadata": {
+        const id = String(params.subscriber_id ?? "");
+        if (!id) throw rpcError("INVALID_PARAMS", "subscriber_id required");
+        const sub = this.subscribers.get(id);
+        if (!sub) throw rpcError("UNKNOWN_SUBSCRIBER", `no subscriber ${id}; have ${Array.from(this.subscribers.keys()).join(",")}`);
+        const wasAvailable = sub.available;
+        if (typeof params.available === "boolean") sub.available = params.available;
+        if (params.label !== undefined) sub.label = params.label ? String(params.label) : undefined;
+        if (params.cwd !== undefined) sub.cwd = params.cwd ? String(params.cwd) : undefined;
+        if (process.env.PEERD_DEBUG_SUBS) console.error(`[peerd] set_session_metadata id=${id} available=${sub.available} label=${sub.label} cwd=${sub.cwd}`);
+        // If we just BECAME available and there are pending invites, replay them
+        // so the new available subscriber sees the popup.
+        if (!wasAvailable && sub.available && this.pendingInvites.size > 0) {
+          for (const inv of this.pendingInvites.values()) {
+            try { sub.inviteCb(inv, false); } catch { /* ignore */ }
+          }
+        }
+        return { ok: true, subscriber_id: id, available: sub.available, label: sub.label, cwd: sub.cwd };
+      }
+
+      case "list_local_sessions":
+        return { sessions: this.listAvailableSessions() };
+
+      case "list_remote_sessions": {
+        const peer = String(params.peer ?? "");
+        if (!peer) throw rpcError("INVALID_PARAMS", "peer required");
+        const conn = this.getConnection ? this.getConnection(peer) : undefined;
+        if (!conn) throw rpcError("PEER_UNREACHABLE", `no live connection to peer "${peer}"`);
+        const sessions = await this.cm.listRemoteSessions(peer, 5000);
+        return { sessions };
       }
 
       case "invite": {
@@ -270,6 +357,7 @@ export class ControlServer {
           context_excerpt: params.context_excerpt as string | undefined,
           first_floor: params.first_floor as "caller" | "callee" | undefined,
           invite_timeout_ms: inviteTimeoutMs,
+          target_subscriber_id: params.target_session_id as string | undefined,
         });
         return res;
       }

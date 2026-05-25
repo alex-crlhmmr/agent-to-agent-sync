@@ -66,6 +66,33 @@ async function bootNode(name: string, dir: string) {
   });
   await peerServer.start();
   const controlServer = new ControlServer({ socketPath: config.controlSocketPath, cm });
+  cm.setSubscriberAccessors({
+    listLocalAvailable: () => controlServer.listAvailableSessions().map((s) => ({
+      id: s.id, label: s.label, cwd: s.cwd, subscribed_at: s.subscribed_at,
+    })),
+    isLocalSubscriberAvailable: (id) => {
+      const s = controlServer.getSubscriber(id);
+      return Boolean(s && s.available);
+    },
+  });
+  // Smoke-stop-hook doesn't spawn peer-mcp children; it tests the hook scripts
+  // against a peerd that needs at least one available subscriber for invites
+  // to land. Register a synthetic "always available" subscriber by mocking the
+  // accessors above to also report a dummy session.
+  cm.setSubscriberAccessors({
+    listLocalAvailable: () => {
+      const real = controlServer.listAvailableSessions().map((s) => ({
+        id: s.id, label: s.label, cwd: s.cwd, subscribed_at: s.subscribed_at,
+      }));
+      if (real.length > 0) return real;
+      return [{ id: "stop-hook-mock", subscribed_at: Date.now() }];
+    },
+    isLocalSubscriberAvailable: (id) => {
+      if (id === "stop-hook-mock") return true;
+      const s = controlServer.getSubscriber(id);
+      return Boolean(s && s.available);
+    },
+  });
   await controlServer.start();
   return { name, config, peerServer, controlServer, cm, connections };
 }
@@ -164,14 +191,16 @@ async function main() {
   if (res.stderr) console.error(`[smoke-stop] check-inbox stderr: ${res.stderr}`);
   if (!res.stdout) throw new Error(`empty stdout despite pending invite (stderr: ${res.stderr})`);
   const parsed = JSON.parse(res.stdout);
-  if (!parsed.hookSpecificOutput?.additionalContext?.includes("📞 You have pending peer call")) {
+  // Banner is in `systemMessage` (Stop hooks don't support additionalContext).
+  const banner: string = parsed.systemMessage ?? parsed.hookSpecificOutput?.additionalContext ?? "";
+  if (!banner.includes("📞 You have pending peer call")) {
     throw new Error(`unexpected banner JSON: ${res.stdout}`);
   }
-  if (!parsed.hookSpecificOutput.additionalContext.includes("User schema sync")) {
+  if (!banner.includes("User schema sync")) {
     throw new Error(`banner missing topic: ${res.stdout}`);
   }
   console.log("[smoke-stop] ✓ peer-check-inbox emits banner JSON when invite pending");
-  console.log("           banner: " + parsed.hookSpecificOutput.additionalContext.split("\n")[0]);
+  console.log("           banner: " + banner.split("\n")[0]);
 
   // ── Test 3: peer-status-line during RINGING ──────────────────
   res = await runScript(STATUS_LINE, alice.config.controlSocketPath, JSON.stringify({}));
@@ -195,12 +224,20 @@ async function main() {
   }
   console.log("[smoke-stop] ✓ peer-status-line shows active call: " + res.stdout.trim());
 
-  // ── Test 5: invite is no longer in inbox after accept ─────────
+  // ── Test 5: invite is no longer in pending inbox; banner now shows active call ─
   res = await runScript(CHECK_INBOX, alice.config.controlSocketPath, JSON.stringify({}));
-  if (res.stdout.trim() !== "") {
-    throw new Error(`expected empty stdout after accept, got: ${res.stdout}`);
+  if (res.stdout.trim() === "") {
+    throw new Error("expected banner about active call after accept; got empty");
   }
-  console.log("[smoke-stop] ✓ peer-check-inbox quiet after invite accepted");
+  const parsedAfterAccept = JSON.parse(res.stdout);
+  const bannerAfterAccept: string = parsedAfterAccept.systemMessage ?? "";
+  if (!bannerAfterAccept.includes("active peer call")) {
+    throw new Error(`expected 'active peer call' banner after accept; got: ${res.stdout}`);
+  }
+  if (bannerAfterAccept.includes("pending peer call")) {
+    throw new Error(`pending invite still visible after accept; got: ${res.stdout}`);
+  }
+  console.log("[smoke-stop] ✓ peer-check-inbox switched to active-call banner after invite accepted");
 
   // ── End and tear down ─────────────────────────────────────────
   await bob.cm.end(ringing.call_id, { reason: "agreement_reached" });

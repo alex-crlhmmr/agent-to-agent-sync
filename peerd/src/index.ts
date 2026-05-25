@@ -72,6 +72,18 @@ async function main() {
     getSelfInfo: () => ({ name: config.self, port: config.port, fingerprint: tls.fingerprintSha256 }),
   });
 
+  // Resolve the circular dep: CallManager needs to read the ControlServer's
+  // subscriber state to gate incoming invites (opt-in) and serve LIST_SESSIONS.
+  callManager.setSubscriberAccessors({
+    listLocalAvailable: () => controlServer.listAvailableSessions().map((s) => ({
+      id: s.id, label: s.label, cwd: s.cwd, subscribed_at: s.subscribed_at,
+    })),
+    isLocalSubscriberAvailable: (id) => {
+      const s = controlServer.getSubscriber(id);
+      return Boolean(s && s.available);
+    },
+  });
+
   // When a /pair request succeeds, commit the new peer.
   peerServer.on("pair_completed", (evt: PairCompleted, ack: (ok: boolean) => void) => {
     addPeer({

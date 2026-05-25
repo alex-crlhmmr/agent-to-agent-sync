@@ -2,27 +2,41 @@
 name: call
 description: Initiate a peer-sync call with another developer's Claude Code agent over peerd. Use when the user asks to call a teammate's agent, sync with another dev's session, or align on an interface contract that spans two layers.
 argument-hint: "<peer-name> <topic>"
-allowed-tools: mcp__peerd__peer_invite mcp__peerd__peer_recv mcp__peerd__peer_send mcp__peerd__peer_end mcp__peerd__peer_human_inject
+allowed-tools: mcp__peerd__peer_invite mcp__peerd__peer_recv mcp__peerd__peer_send mcp__peerd__peer_end mcp__peerd__peer_human_inject mcp__peerd__peer_list_remote_sessions
 ---
 
 # /call — initiate a peer-sync call
 
-The user has asked to call another developer's agent. Arguments: `$1` is the peer name (as configured in their `~/.claude/peerd/peers.toml`), `$2…` is the topic.
+Arguments: `$1` is the peer name, `$2…` is the topic.
 
 ## Steps
 
-1. **Invite.** Call `mcp__peerd__peer_invite` with:
-   - `peer: "$1"` — typos are auto-corrected to the closest known peer name. The response includes an `auto_corrected` field if a correction was applied; mention it to the user.
-   - `topic: "$2 $3 $4 …"` (whatever follows the peer name)
-   - `caller_label`: a short identifier for yourself, e.g., the user's name plus current project
-   - `context_excerpt`: a 1–3 sentence summary of why you're calling
-   - `timeout_s`: optional. **Leave it unset unless the user EXPLICITLY gave a time window** (e.g. "give her 30 seconds", "wait 5 minutes for him"). The default (150s = 2.5 min) is deliberately generous to cover popup-render + user-decision + accept-roundtrip latency. Words like "quick" in the topic do NOT mean shorten the timeout — they describe the SUBJECT of the call, not how patient to be with the peer. If you're tempted to pass 60s or less, don't — it's almost always wrong.
+1. **Check who's reachable on the peer.** Call `mcp__peerd__peer_list_remote_sessions` with `peer: "$1"`. Peerd is opt-in: only sessions where the receiver ran `/make-available-for-call` show up.
 
-   This blocks until the peer accepts/declines or the timeout fires. If you're not sure who's available, call `mcp__peerd__peer_list_peers` first.
+   - **If `sessions: []`**: tell the user `"<peer>'s claude sessions aren't accepting calls right now. Ask them to run /make-available-for-call."` Stop.
+   - **If 1 session**: skip the picker. Note the `id` for use in the next step.
+   - **If 2+ sessions**: use `AskUserQuestion` to let the user pick. Options should show:
+     - The label if present, otherwise "(no label)"
+     - The cwd (basename is enough)
+     - How long ago it started
+     Example option label: `"work — user-api (8m ago)"`. Keep options concise. Add an "Any" option as a 4th choice that means "let peerd route to whoever".
 
-2. **If declined** (`accepted=false`): report the reason briefly and stop. Don't retry automatically.
+2. **Invite.** Call `mcp__peerd__peer_invite` with:
+   - `peer: "$1"` (the response may include `auto_corrected` if there was a typo — mention to user).
+   - `topic: "$2 $3 $4 …"`
+   - `caller_label`: a short identifier for yourself
+   - `context_excerpt`: 1–3 sentence summary of why you're calling
+   - `target_session_id`: the `id` of the picked session. **Omit ONLY if user picked "Any" in the picker, or if there was only 1 session AND you want to let peerd decide (rare — prefer the explicit id).**
+   - `timeout_s`: optional. Leave unset unless user gave an EXPLICIT time window.
 
-3. **If accepted**: you have the floor first. Open with a concrete proposal — propose the interface, the type, the encoding, the contract. Don't open with "hi" or "what do you think?" — the peer agent has limited context, so anchor immediately. Use `mcp__peerd__peer_send`.
+3. **Handle the response:**
+   - `accepted=true`: proceed to the conversation loop (step 4).
+   - `accepted=false, reason=NO_AVAILABLE_SESSIONS`: tell user the peer's sessions just went away. Suggest retry later.
+   - `accepted=false, reason=NO_SUCH_SESSION`: the targeted session went unavailable between list and invite. Re-run step 1 and retry.
+   - `accepted=false, reason=INVITE_TIMEOUT`: peer didn't accept in time.
+   - `accepted=false, reason=INVITE_DECLINED` (with a `reason` field): peer's agent declined. Surface the message.
+
+4. **You have the floor first.** Open with a concrete proposal — anchor the call. Use `mcp__peerd__peer_send`.
 
 4. **Conversation loop.** After every `peer_send`, the floor transfers — you MUST call `peer_recv` next (consecutive sends return `OUT_OF_TURN`). Loop:
    - `mcp__peerd__peer_recv` with `call_id` and `timeout_s: 300`

@@ -73,6 +73,15 @@ async function bootNode(name: string, stateDir: string): Promise<PeerdNode> {
   });
   await peerServer.start();
   const controlServer = new ControlServer({ socketPath: config.controlSocketPath, cm });
+  cm.setSubscriberAccessors({
+    listLocalAvailable: () => controlServer.listAvailableSessions().map((s) => ({
+      id: s.id, label: s.label, cwd: s.cwd, subscribed_at: s.subscribed_at,
+    })),
+    isLocalSubscriberAvailable: (id) => {
+      const s = controlServer.getSubscriber(id);
+      return Boolean(s && s.available);
+    },
+  });
   await controlServer.start();
   return { name, config, peerServer, controlServer, cm, connections };
 }
@@ -118,18 +127,29 @@ async function main() {
 
   // Alice's shim subscribes to incoming invites and auto-accepts.
   const aliceInvites: any[] = [];
-  aliceClient.subscribe("subscribe_inbox", {}, async (n: any) => {
-    if (n.kind === "invite") {
-      aliceInvites.push(n.payload);
-      console.log(`[alice-shim] incoming invite ${n.payload.call_id} from ${n.payload.from} re: "${n.payload.topic}"`);
-      try {
-        const result = await aliceClient.call("accept_invite", { call_id: n.payload.call_id });
-        console.log(`[alice-shim] accepted; session_token=${(result as any).session_token?.slice(0, 16)}...`);
-      } catch (e: any) {
-        console.log(`[alice-shim] accept failed: ${e.message}`);
+  let aliceSubscriberId: string | null = null;
+  const subReady = new Promise<void>((resolve) => {
+    aliceClient.subscribe("subscribe_inbox", {}, async (n: any) => {
+      if (n.kind === "subscribed") {
+        aliceSubscriberId = n.payload?.subscriber_id ?? null;
+        resolve();
+        return;
       }
-    }
+      if (n.kind === "invite") {
+        aliceInvites.push(n.payload);
+        console.log(`[alice-shim] incoming invite ${n.payload.call_id} from ${n.payload.from} re: "${n.payload.topic}"`);
+        try {
+          const result = await aliceClient.call("accept_invite", { call_id: n.payload.call_id });
+          console.log(`[alice-shim] accepted; session_token=${(result as any).session_token?.slice(0, 16)}...`);
+        } catch (e: any) {
+          console.log(`[alice-shim] accept failed: ${e.message}`);
+        }
+      }
+    });
   });
+  await subReady;
+  // Make alice available so bob's invite isn't rejected.
+  await aliceClient.call("set_session_metadata", { subscriber_id: aliceSubscriberId, available: true });
 
   // Give the subscribe round-trip a moment to register on the server side.
   await new Promise((r) => setTimeout(r, 50));

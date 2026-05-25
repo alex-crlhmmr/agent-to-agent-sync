@@ -16,7 +16,9 @@ export type MessageType =
   | "HUMAN_INJECT"
   | "ERROR"
   | "DISCONNECT"
-  | "RESUME";
+  | "RESUME"
+  | "LIST_SESSIONS"
+  | "LIST_SESSIONS_RESPONSE";
 
 export interface Envelope<T = unknown> {
   v: 1;
@@ -52,6 +54,8 @@ export interface InvitePayload {
   first_floor?: "caller" | "callee";
   suggested_artifacts?: string[];
   context_excerpt?: string;
+  /** Optional: target a specific subscriber on the callee side (from list_remote_sessions). */
+  target_subscriber_id?: string;
 }
 
 export interface InviteResponsePayload {
@@ -94,6 +98,23 @@ export interface ErrorPayload {
 
 export interface DisconnectPayload { reason?: string; }
 
+export interface ListSessionsPayload {
+  request_id: string;
+}
+
+export interface SessionInfo {
+  id: string;
+  label?: string;
+  cwd?: string;
+  /** ISO timestamp when the subscriber connected. */
+  subscribed_at: string;
+}
+
+export interface ListSessionsResponsePayload {
+  request_id: string;
+  sessions: SessionInfo[];
+}
+
 export interface ResumePayload {
   call_id: string;
   last_seq_received: number;
@@ -116,6 +137,10 @@ export const ErrorCode = {
   REF_UNAVAILABLE: "REF_UNAVAILABLE",
   RATE_LIMITED: "RATE_LIMITED",
   INTERNAL_ERROR: "INTERNAL_ERROR",
+  /** No subscribers on the remote peerd are available (opted-in). */
+  NO_AVAILABLE_SESSIONS: "NO_AVAILABLE_SESSIONS",
+  /** Target session was specified but doesn't exist or is no longer available. */
+  NO_SUCH_SESSION: "NO_SUCH_SESSION",
 } as const;
 export type ErrorCodeT = (typeof ErrorCode)[keyof typeof ErrorCode];
 

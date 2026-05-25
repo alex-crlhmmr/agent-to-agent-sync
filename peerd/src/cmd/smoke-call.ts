@@ -56,6 +56,10 @@ async function bootNode(name: string, stateDir: string): Promise<PeerdNode> {
     selfName: config.self,
     stateDir: config.stateDir,
     getConnection: (peer) => connections.get(peer),
+    // Smoke test driving CallManager directly — bypass the opt-in gate by
+    // pretending there's always one available subscriber.
+    listLocalAvailable: () => [{ id: "smoke-only", subscribed_at: Date.now() }],
+    isLocalSubscriberAvailable: (id) => id === "smoke-only",
   });
 
   server.on("connection", (conn: Connection) => {

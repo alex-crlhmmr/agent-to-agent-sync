@@ -95,6 +95,15 @@ async function bootPeerd(name: string, stateDir: string): Promise<PeerdNode> {
     config,
     getConnection: (peer) => connections.get(peer),
   });
+  cm.setSubscriberAccessors({
+    listLocalAvailable: () => controlServer.listAvailableSessions().map((s) => ({
+      id: s.id, label: s.label, cwd: s.cwd, subscribed_at: s.subscribed_at,
+    })),
+    isLocalSubscriberAvailable: (id) => {
+      const s = controlServer.getSubscriber(id);
+      return Boolean(s && s.available);
+    },
+  });
   await controlServer.start();
   return { name, config, peerServer, controlServer, cm, connections };
 }
@@ -174,10 +183,15 @@ async function main() {
   const tools = await bobMcp.listTools();
   const names = tools.tools.map((t) => t.name).sort();
   console.log(`[smoke-mcp] tools advertised: ${names.join(", ")}`);
-  const expected = ["peer_accept_invite", "peer_end", "peer_invite", "peer_list_inbox", "peer_recv", "peer_send"];
+  const expected = ["peer_accept_invite", "peer_end", "peer_invite", "peer_list_inbox", "peer_list_remote_sessions", "peer_make_available", "peer_recv", "peer_send", "peer_unmake_available"];
   for (const t of expected) {
     if (!names.includes(t)) throw new Error(`missing tool: ${t}`);
   }
+
+  // 3a. Alice opts in to receive calls (new opt-in default).
+  await aliceMcp.callTool({ name: "peer_make_available", arguments: { label: "smoke" } });
+  // Give peerd a moment to propagate the metadata change.
+  await new Promise((r) => setTimeout(r, 100));
 
   // 4. Kick off the invite flow.
   //    bob calls peer_invite (blocks until accepted)

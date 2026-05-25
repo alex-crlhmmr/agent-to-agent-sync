@@ -119,6 +119,15 @@ async function main() {
       },
       instructions:
         "You are connected to peerd — a peer-to-peer chat bridge between developer agents.\n\n" +
+        "IMPORTANT: This session is NOT reachable for incoming calls by default. The user must opt-in via the /make-available-for-call skill (or by launching claude with PEERD_AVAILABLE=1). If they ask why peers can't call them, that's why.\n\n" +
+        "CALLER FLOW — when the user asks to call <peer> about <topic>:\n" +
+        "  1. Call mcp__peerd__peer_list_remote_sessions(peer) FIRST.\n" +
+        "  2. Look at the returned sessions array:\n" +
+        "     - If empty: tell user '<peer> isn't accepting calls right now (no claude session is opted in).' Stop.\n" +
+        "     - If 1 session: call mcp__peerd__peer_invite with target_session_id=<that session's id>. No picker needed.\n" +
+        "     - If 2+ sessions: use AskUserQuestion to let user pick. Options should show label, cwd, and started-age (e.g. \"work — ~/projects/user-api (8m ago)\"). Then peer_invite with the chosen target_session_id.\n" +
+        "  3. If invite returns {accepted: false, reason: \"NO_SUCH_SESSION\"}: the targeted session went unavailable between list and invite. Re-run peer_list_remote_sessions and retry.\n" +
+        "  4. If accepted: drive the recv/send loop as before.\n\n" +
         "Incoming events from other developers' agents arrive as <channel source=\"peerd\" ...> blocks. ACT IMMEDIATELY based on the `kind` meta attribute — no narration, no asking the user before driving the right tool.\n\n" +
         "Channel event kinds:\n" +
         "  - invite:    A peer is calling. THIS IS A TWO-STEP PROCESS — you MUST do both steps:\n" +
@@ -152,13 +161,14 @@ async function main() {
   server.registerTool(
     "peer_invite",
     {
-      description: "Initiate a peer-sync call. If `peer` doesn't exactly match a known peer name, the closest match is used automatically (with a note in the result). Blocks until the peer accepts/declines or the timeout fires (default 2.5 minutes; can be overridden via `timeout_s`). Returns the call_id to use with peer_send / peer_recv / peer_end. If the user says something like \"call alice quick\" or \"call alice with a 1-minute window\", pass `timeout_s` accordingly (otherwise leave it unset for the 150s default).",
+      description: "Initiate a peer-sync call. If `peer` doesn't exactly match a known peer name, the closest match is used automatically (with a note in the result). Blocks until the peer accepts/declines or the timeout fires (default 2.5 minutes). Returns the call_id to use with peer_send / peer_recv / peer_end. If the peer's claude side hasn't opted in to receive calls (no /make-available-for-call), this returns accepted=false with reason=NO_AVAILABLE_SESSIONS. To target a specific session on a peer with multiple sessions available, pass target_session_id from peer_list_remote_sessions.",
       inputSchema: {
         peer: z.string().describe("Peer name (case-insensitive). Typos are auto-corrected to the closest known name."),
         topic: z.string().describe("Short topic, shown on the callee's incoming-call popup."),
         caller_label: z.string().optional().describe("How to identify yourself (e.g., \"bob@layer-b\")."),
         context_excerpt: z.string().optional().describe("1-3 sentences of context shown to the callee in the popup."),
-        timeout_s: z.number().int().min(5).max(600).optional().describe("How long (seconds) to wait for the peer to ACCEPT the call before timing out. This is about the peer's response speed, NOT about the topic. Default 150 (2.5 minutes) — leave it unset in almost all cases. Only set if the user explicitly gave a time window (e.g. 'wait only 30s', 'give him 5 min'). DO NOT shorten just because the topic contains words like 'quick' — those describe the call's subject, not impatience with the peer."),
+        timeout_s: z.number().int().min(5).max(600).optional().describe("Seconds to wait for the peer to ACCEPT before timing out. Default 150 (2.5 min). Only set if the user gave an explicit time window."),
+        target_session_id: z.string().optional().describe("Optional: target a specific subscriber on the peer (from peer_list_remote_sessions). If omitted, the call routes to the peer's newest available session. If set and that session is no longer available, the invite fails with reason=NO_SUCH_SESSION (no fallback)."),
       },
     },
     async (input) => {
@@ -178,18 +188,89 @@ async function main() {
       if (input.caller_label) params.caller_label = input.caller_label;
       if (input.context_excerpt) params.context_excerpt = input.context_excerpt;
       if (input.timeout_s !== undefined) params.invite_timeout_s = input.timeout_s;
-      // Outer RPC timeout is 20s longer than the server-side invite timeout
-      // so the daemon's timeout always fires first.
+      if (input.target_session_id) params.target_session_id = input.target_session_id;
       const inviteTimeoutS = input.timeout_s ?? 150;
       const res = await client.call<{ call_id: string; accepted: boolean; reason?: string; session_token?: string }>(
         "invite",
         params,
         { timeoutMs: (inviteTimeoutS + 20) * 1000 },
       );
-      // Mark THIS session as the owner of the call so subsequent connected/
-      // ended channel events are delivered to this session's agent only.
-      if (res?.call_id) ownedByThisSession.add(res.call_id);
+      if (res?.call_id && res.accepted) ownedByThisSession.add(res.call_id);
       return asTextResult({ ...res, auto_corrected: resolved.auto_corrected });
+    },
+  );
+
+  // ── peer_make_available ────────────────────────────────────────
+  server.registerTool(
+    "peer_make_available",
+    {
+      description: "Make THIS claude session available to receive peer calls. By default a new session is NOT reachable — callers won't see it in peer_list_remote_sessions and can't invite it. Call this once when the user signals readiness (e.g., /make-available-for-call, or starts work expecting calls). Optional `label` lets callers target this specific session by name.",
+      inputSchema: {
+        label: z.string().optional().describe("Optional short name (e.g., \"work\", \"user-api\") shown to callers in their session picker."),
+      },
+    },
+    async ({ label }) => {
+      if (!mySubscriberId) {
+        return asTextResult({ error: "NOT_SUBSCRIBED", message: "peer-mcp hasn't received its subscriber_id yet. Try again in a moment." });
+      }
+      const params: Record<string, unknown> = {
+        subscriber_id: mySubscriberId,
+        available: true,
+        cwd: process.cwd(),
+      };
+      if (label) params.label = label;
+      const res = await client.call("set_session_metadata", params, { timeoutMs: 3000 });
+      return asTextResult(res);
+    },
+  );
+
+  // ── peer_unmake_available ──────────────────────────────────────
+  server.registerTool(
+    "peer_unmake_available",
+    {
+      description: "Take THIS claude session OUT of the pool of sessions reachable for peer calls. After this, peer_list_remote_sessions won't include us and we can't be invited (until peer_make_available is called again).",
+      inputSchema: {},
+    },
+    async () => {
+      if (!mySubscriberId) {
+        return asTextResult({ error: "NOT_SUBSCRIBED", message: "peer-mcp hasn't received its subscriber_id yet." });
+      }
+      const res = await client.call("set_session_metadata", {
+        subscriber_id: mySubscriberId,
+        available: false,
+      }, { timeoutMs: 3000 });
+      return asTextResult(res);
+    },
+  );
+
+  // ── peer_list_remote_sessions ──────────────────────────────────
+  server.registerTool(
+    "peer_list_remote_sessions",
+    {
+      description: "List the claude sessions currently available to receive a call on a given peer (only sessions where the receiver ran /make-available-for-call). Returns array of {id, label?, cwd?, subscribed_at}. Use BEFORE peer_invite: if 0 sessions, tell user the peer isn't reachable; if 1 session, call peer_invite with that target_session_id directly; if 2+ sessions, use AskUserQuestion to let user pick.",
+      inputSchema: {
+        peer: z.string().describe("Peer name (typos auto-corrected as in peer_invite)."),
+      },
+    },
+    async ({ peer }) => {
+      const peers = await listPeers();
+      const resolved = resolvePeer(peer, peers);
+      if (!resolved) {
+        return asTextResult({
+          error: "UNKNOWN_PEER",
+          message: `No peer matched "${peer}". Known peers: ${peers.map((p) => p.name).join(", ") || "(none)"}.`,
+        });
+      }
+      try {
+        const res = await client.call<{ sessions: any[] }>("list_remote_sessions", { peer: resolved.name }, { timeoutMs: 8000 });
+        return asTextResult({ peer: resolved.name, sessions: res.sessions });
+      } catch (e: any) {
+        return asTextResult({
+          error: e?.code ?? "ERROR",
+          message: e?.message ?? String(e),
+          peer: resolved.name,
+        });
+      }
     },
   );
 
@@ -345,6 +426,29 @@ async function main() {
  * for each interesting one. When delivered, Claude Code renders them as
  * <channel source="peerd" kind="..."> blocks in the agent's context, waking it.
  */
+/** Captured at startup from peerd's first subscribe_inbox notification. */
+let mySubscriberId: string | null = null;
+
+/**
+ * If PEERD_AVAILABLE env var is set, opt this session in automatically on
+ * subscriber_id arrival. Values:
+ *   PEERD_AVAILABLE=1 / true     → available, no label
+ *   PEERD_AVAILABLE=<anything>   → available, label = that string
+ */
+async function maybeAutoMakeAvailable(client: PeerdClient): Promise<void> {
+  if (!mySubscriberId) return;
+  const raw = process.env.PEERD_AVAILABLE;
+  if (!raw) return;
+  const params: Record<string, unknown> = {
+    subscriber_id: mySubscriberId,
+    available: true,
+    cwd: process.cwd(),
+  };
+  if (raw !== "1" && raw.toLowerCase() !== "true") params.label = raw;
+  await client.call("set_session_metadata", params, { timeoutMs: 3000 });
+  console.error(`[peer-mcp] auto-made-available (label=${params.label ?? "(none)"})`);
+}
+
 async function startChannelBridge(server: McpServer, client: PeerdClient): Promise<void> {
   console.error("[peer-mcp] starting channel bridge");
 
@@ -365,6 +469,19 @@ async function startChannelBridge(server: McpServer, client: PeerdClient): Promi
   // Subscribe to incoming invites + resolution events.
   client.subscribe("subscribe_inbox", {}, (n: unknown) => {
     const note = n as { kind?: string; payload?: any };
+
+    // First notification: peerd assigns this session a subscriber_id.
+    if (note?.kind === "subscribed") {
+      mySubscriberId = note.payload?.subscriber_id ?? null;
+      console.error(`[peer-mcp] my subscriber_id: ${mySubscriberId}`);
+      // If PEERD_AVAILABLE is set, opt this session in to receiving calls
+      // automatically (so users who set the env at `claude` launch don't
+      // need to type /make-available-for-call).
+      maybeAutoMakeAvailable(client).catch((e) =>
+        console.error(`[peer-mcp] auto make-available failed: ${e?.message ?? e}`),
+      );
+      return;
+    }
 
     if (note?.kind === "invite") {
       const inv = note.payload;
