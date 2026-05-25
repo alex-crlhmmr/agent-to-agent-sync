@@ -15,9 +15,10 @@ The user has asked to call another developer's agent. Arguments: `$1` is the pee
    - `peer: "$1"` — typos are auto-corrected to the closest known peer name. The response includes an `auto_corrected` field if a correction was applied; mention it to the user.
    - `topic: "$2 $3 $4 …"` (whatever follows the peer name)
    - `caller_label`: a short identifier for yourself, e.g., the user's name plus current project
-   - `context_excerpt`: a 1–3 sentence summary of why you're calling (what interface/decision you need to align on)
+   - `context_excerpt`: a 1–3 sentence summary of why you're calling
+   - `timeout_s`: optional. Default is 150s (2.5 minutes). Pass a shorter value (e.g. 30, 60) if the user signaled they want a quick answer ("call alice quick", "quick ping"), or a longer value (up to 600) if they said something like "alice's slow, give her time" or named a specific window. **Don't ask** — infer from context; only pass it when there's a clear signal.
 
-   This blocks until the peer accepts/declines (up to ~5 minutes). If you're not sure who's available, call `mcp__peerd__peer_list_peers` first.
+   This blocks until the peer accepts/declines or the timeout fires. If you're not sure who's available, call `mcp__peerd__peer_list_peers` first.
 
 2. **If declined** (`accepted=false`): report the reason briefly and stop. Don't retry automatically.
 

@@ -134,12 +134,13 @@ async function main() {
   server.registerTool(
     "peer_invite",
     {
-      description: "Initiate a peer-sync call. If `peer` doesn't exactly match a known peer name, the closest match is used automatically (with a note in the result). Blocks up to ~5 minutes waiting for the peer to accept. Returns the call_id to use with peer_send / peer_recv / peer_end.",
+      description: "Initiate a peer-sync call. If `peer` doesn't exactly match a known peer name, the closest match is used automatically (with a note in the result). Blocks until the peer accepts/declines or the timeout fires (default 2.5 minutes; can be overridden via `timeout_s`). Returns the call_id to use with peer_send / peer_recv / peer_end. If the user says something like \"call alice quick\" or \"call alice with a 1-minute window\", pass `timeout_s` accordingly (otherwise leave it unset for the 150s default).",
       inputSchema: {
         peer: z.string().describe("Peer name (case-insensitive). Typos are auto-corrected to the closest known name."),
         topic: z.string().describe("Short topic, shown on the callee's incoming-call popup."),
         caller_label: z.string().optional().describe("How to identify yourself (e.g., \"bob@layer-b\")."),
         context_excerpt: z.string().optional().describe("1-3 sentences of context shown to the callee in the popup."),
+        timeout_s: z.number().int().min(5).max(600).optional().describe("How long (seconds) to wait for the peer to accept before timing out. Default 150 (2.5 minutes). Use a shorter value when the user wants a quick answer; a longer value when they expect the peer to be slow to respond."),
       },
     },
     async (input) => {
@@ -158,10 +159,14 @@ async function main() {
       };
       if (input.caller_label) params.caller_label = input.caller_label;
       if (input.context_excerpt) params.context_excerpt = input.context_excerpt;
+      if (input.timeout_s !== undefined) params.invite_timeout_s = input.timeout_s;
+      // Outer RPC timeout is 20s longer than the server-side invite timeout
+      // so the daemon's timeout always fires first.
+      const inviteTimeoutS = input.timeout_s ?? 150;
       const res = await client.call<{ call_id: string; accepted: boolean; reason?: string; session_token?: string }>(
         "invite",
         params,
-        { timeoutMs: 320_000 },
+        { timeoutMs: (inviteTimeoutS + 20) * 1000 },
       );
       return asTextResult({ ...res, auto_corrected: resolved.auto_corrected });
     },

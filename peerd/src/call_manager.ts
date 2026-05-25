@@ -15,7 +15,7 @@ import {
 import { callId, nowIso, sessionToken } from "./ids.js";
 import { envelope, errorEnvelope } from "./wire.js";
 
-const INVITE_TIMEOUT_MS = 300_000; // 5 minutes — long enough for callee to come back to terminal
+const INVITE_TIMEOUT_MS_DEFAULT = 150_000; // 2.5 minutes — overridable per call via invite opts
 
 export interface CallManagerOptions {
   selfName: string;
@@ -81,7 +81,8 @@ export class CallManager extends EventEmitter {
 
   // ──────────────────────────── outgoing API ────────────────────────────
 
-  async invite(peerName: string, topic: string, opts: { caller_label?: string; context_excerpt?: string; first_floor?: "caller" | "callee" } = {}): Promise<InviteResolution> {
+  async invite(peerName: string, topic: string, opts: { caller_label?: string; context_excerpt?: string; first_floor?: "caller" | "callee"; invite_timeout_ms?: number } = {}): Promise<InviteResolution> {
+    const inviteTimeoutMs = Math.max(5_000, Math.min(600_000, opts.invite_timeout_ms ?? INVITE_TIMEOUT_MS_DEFAULT));
     const conn = this.getConnection(peerName);
     if (!conn) throw new Error(`peer "${peerName}" not connected`);
 
@@ -113,7 +114,7 @@ export class CallManager extends EventEmitter {
       caller_label: opts.caller_label ?? this.selfName,
       first_floor: opts.first_floor ?? "caller",
       context_excerpt: opts.context_excerpt,
-      expires_at: new Date(Date.now() + INVITE_TIMEOUT_MS).toISOString(),
+      expires_at: new Date(Date.now() + inviteTimeoutMs).toISOString(),
     };
 
     const env = envelope<InvitePayload>("INVITE", this.selfName, payload, {
@@ -141,7 +142,7 @@ export class CallManager extends EventEmitter {
           }
         }
         resolve({ call_id: cid, accepted: false, reason: "INVITE_TIMEOUT" });
-      }, INVITE_TIMEOUT_MS);
+      }, inviteTimeoutMs);
       this.pending.set(cid, { resolve, reject, timer });
     });
   }

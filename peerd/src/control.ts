@@ -208,10 +208,14 @@ export class ControlServer {
         const peer = String(params.peer ?? "");
         const topic = String(params.topic ?? "");
         if (!peer || !topic) throw rpcError("INVALID_PARAMS", "peer and topic required");
+        const inviteTimeoutMs = params.invite_timeout_s !== undefined
+          ? Math.round(Number(params.invite_timeout_s) * 1000)
+          : undefined;
         const res = await this.cm.invite(peer, topic, {
-          caller_label: params.caller_label,
-          context_excerpt: params.context_excerpt,
-          first_floor: params.first_floor,
+          caller_label: params.caller_label as string | undefined,
+          context_excerpt: params.context_excerpt as string | undefined,
+          first_floor: params.first_floor as "caller" | "callee" | undefined,
+          invite_timeout_ms: inviteTimeoutMs,
         });
         return res;
       }
