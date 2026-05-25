@@ -5,13 +5,15 @@
   "description": "Direct agent-to-agent communication between Claude Code instances over LAN/Tailscale.",
   "workspaces": [
     "peerd",
-    "peer-mcp"
+    "peer-mcp",
+    "peerd-cli"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "peerd": "npm run start -w peerd",
     "peerd:dev": "npm run dev -w peerd",
     "mcp": "npm run start -w peer-mcp",
+    "cli": "npm run start -w peerd-cli --",
     "wire-claude-code": "node install.mjs",
     "wire-claude-code:launchagent": "node install.mjs --launchagent",
     "local-test": "node local-test-setup.mjs"

@@ -2,7 +2,7 @@
 
 **Two Claude Code agents on different machines hold a direct conversation** to align on interface contracts, schema changes, design decisions — with the humans watching and able to intervene. The conversation flows into each agent's normal session via MCP Channels, so after the call both sides retain full context with zero copy-paste.
 
-> ⚠️ **Research-preview**: relies on Claude Code's experimental Channels feature (v2.1.80+) for ambient call delivery. Works on macOS today; Linux/Windows untested. The MCP server runs fine cross-platform but notifications and LaunchAgent are mac-only.
+> ⚠️ **Research-preview**: relies on Claude Code's experimental Channels feature (v2.1.80+) for ambient call delivery. Works on **macOS** and **Ubuntu/Linux**. The daemon, MCP server, channel delivery, and `AskUserQuestion` popup work cross-platform; only macOS notification ringing and LaunchAgent auto-start are mac-only.
 
 For the design rationale see [`ARCHITECTURE.md`](./ARCHITECTURE.md). For the wire protocol see [`PROTOCOL.md`](./PROTOCOL.md).
 
@@ -12,7 +12,7 @@ For the design rationale see [`ARCHITECTURE.md`](./ARCHITECTURE.md). For the wir
 
 - **Claude Code** v2.1.80+ — confirmed working on v2.1.150
 - **Node.js** 18+
-- **macOS** for the full UX (notifications, LaunchAgent). Other platforms run the daemon but lose macOS-specific bits.
+- **macOS** (full UX, with macOS notification ringing + LaunchAgent) **or Ubuntu/Linux** (everything works except the macOS notification + LaunchAgent).
 - **Tailscale** (recommended for cross-network calls). LAN + mDNS also works.
 
 ---
@@ -65,68 +65,82 @@ npm run local-test
 
 ## Use it with a real teammate
 
-> The install path is still hand-managed. A `peerd init` CLI is on the roadmap.
+Three commands per machine + one pairing exchange. The `peerd` CLI handles all the credential exchange + config wiring; no hand-editing.
 
-### Step 1 — install on each machine
+### Step 1 — install on each machine (mac AND/OR linux)
 
 ```bash
 git clone https://github.com/alex-crlhmmr/agent-to-agent-sync.git
 cd agent-to-agent-sync
 npm install && npm run build
-npm run wire-claude-code     # writes ~/.claude/settings.json with hooks + statusLine + permissions
 ```
 
-To auto-start peerd at login:
+### Step 2 — configure peerd on each machine
+
 ```bash
-npm run wire-claude-code:launchagent
+# Mac:
+npm exec peerd init --name <your-name> --launchagent
+
+# Ubuntu/Linux: (no LaunchAgent — that's mac-only)
+npm exec peerd init --name <your-name>
 ```
-Otherwise, start it manually each time:
+
+`peerd init`:
+- Generates a TLS keypair at `~/.claude/peerd/tls/`.
+- Wires `~/.claude/settings.json` (hooks, status line, permissions for peerd MCP tools + skills).
+- Registers peerd as a user-scoped MCP server in `~/.claude.json`.
+- Symlinks the skills into `~/.claude/skills/`.
+- Appends a `claude` shell alias (adds the `--dangerously-load-development-channels server:peerd` flag automatically).
+- On Mac with `--launchagent`, installs the LaunchAgent so peerd auto-starts at login.
+
+It prints your **peer name**, **reachable-at hostname**, and **TLS fingerprint** — you don't need to share those manually; pairing handles it.
+
+### Step 3 — start peerd
+
 ```bash
+# Mac with --launchagent: already running. Verify:
+peerd status
+
+# Otherwise (Mac without --launchagent, or Linux): start manually
 npm run peerd
+# (or background it: nohup npm run peerd > ~/.claude/peerd/peerd.log 2>&1 &)
 ```
 
-The first run generates a TLS keypair at `~/.claude/peerd/tls/` and writes a stub `~/.claude/peerd/peers.toml`. Note the printed **TLS fingerprint** — you'll share it with your teammate.
+### Step 4 — pair (once per teammate, ever)
 
-### Step 2 — exchange credentials out-of-band
+Coordinate so you both hit Enter within ~60s of each other.
 
-Each side generates a long random token (e.g. `openssl rand -hex 24`). Then over Signal / Bitwarden / in person, exchange:
-
-- Your TLS fingerprint (`sha256/...`)
-- The token your teammate should present TO you (their "outgoing"; your "inbound")
-
-### Step 3 — edit `~/.claude/peerd/peers.toml`
-
-```toml
-self = "alice"            # your name on the directory
-port = 7777
-
-[peers.bob]
-host          = "bob-mac.tailnet-name.ts.net"   # Tailscale MagicDNS or LAN host
-port          = 7777
-token         = "<your outgoing token TO bob>"
-inbound_token = "<bob's outgoing token TO you>"
-fingerprint   = "sha256/<bob's TLS fingerprint>"
-```
-
-Restart peerd on both sides. They auto-dial each other on launch and should print `handshake done with <peer>`.
-
-### Step 4 — launch Claude Code with channels enabled
-
+**Receiver (your teammate, "bob"):**
 ```bash
-claude --dangerously-load-development-channels server:peerd
+peerd ready
 ```
 
-Or alias it:
+**Initiator (you):**
 ```bash
-alias claude='claude --dangerously-load-development-channels server:peerd'
+peerd pair <bob's-tailscale-hostname>
+# e.g.  peerd pair bob-mac.tailnet-name.ts.net
 ```
 
-In any session, ask:
+Both sides print:
 ```
-call bob and align on the User schema
+✔ paired with <name> at <host>:7777
 ```
 
-Your agent will use the `/call` skill and dial. Bob sees the popup, accepts, conversation runs. Both sides keep the full transcript in their session context.
+Tokens + fingerprints + both `peers.toml` files are exchanged and written automatically. The daemons auto-dial each other on success.
+
+Verify:
+```bash
+peerd list
+# → bob   bob-mac.tailnet-name.ts.net   ✔
+```
+
+### Step 5 — daily use
+
+Open a **new terminal** (so the shell alias added by `peerd init` is in scope):
+```bash
+claude
+> call bob about the User schema
+```
 
 ---
 
@@ -147,9 +161,23 @@ The repo doesn't ship binaries. peerd runs via `tsx` (TypeScript executor) on No
 
 ---
 
+## `peerd` CLI subcommands
+
+After `npm exec peerd init`, the `peerd` CLI is available via `npm exec peerd <cmd>` (or `node peerd-cli/dist/index.js <cmd>` if you prefer to skip the npm wrapper).
+
+| | |
+|---|---|
+| `peerd init [--name N] [--launchagent] [--no-alias]` | turnkey setup |
+| `peerd ready [--seconds N]` | open the local /pair endpoint for N seconds (default 60) |
+| `peerd pair <hostname> [--port P] [--my-host H]` | exchange credentials with the peerd at `<hostname>`; updates `peers.toml` automatically on both sides |
+| `peerd list` | known peers + online state |
+| `peerd status` | daemon health, fingerprint, active calls |
+| `peerd remove <peer>` | drop a peer from `peers.toml` |
+| `peerd help` | usage |
+
 ## Skills (slash commands)
 
-After `wire-claude-code`, the following are available in any Claude Code session:
+After `peerd init`, the following are available in any Claude Code session:
 
 | | |
 |---|---|
@@ -170,9 +198,10 @@ npx tsx src/cmd/smoke-call.ts         # in-process call lifecycle (turn-lock val
 npx tsx src/cmd/smoke-control.ts      # call driven through the Unix control socket
 npx tsx src/cmd/smoke-mcp.ts          # call driven through the MCP protocol
 npx tsx src/cmd/smoke-stop-hook.ts    # Stop hook + status line script
+npx tsx src/cmd/smoke-pair.ts         # zero-touch pairing (peerd ready / peerd pair)
 ```
 
-All five should print `PASS`.
+All six should print `PASS`.
 
 ---
 

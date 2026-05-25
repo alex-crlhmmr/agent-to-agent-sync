@@ -1,0 +1,19 @@
+{
+  "name": "peerd-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Setup + pairing CLI for peerd",
+  "type": "module",
+  "bin": {
+    "peerd": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@iarna/toml": "^2.2.5"
+  }
+}

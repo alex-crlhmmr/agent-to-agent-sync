@@ -28,6 +28,21 @@ export interface ControlServerOptions {
   /** Optional: needed for list_peers to report online state. */
   config?: Config;
   getConnection?: (peerName: string) => Connection | undefined;
+  /** Optional: called when peerd should enter pairing mode for N seconds. Returns the deadline (epoch ms). */
+  enterPairingMode?: (seconds: number) => number;
+  exitPairingMode?: () => void;
+  isPairingMode?: () => boolean;
+  /** Optional: write a new peer entry to peers.toml and hot-load. Returns true on success. */
+  addPeer?: (entry: {
+    name: string;
+    host: string;
+    port: number;
+    outgoing_token: string;
+    inbound_token: string;
+    fingerprint: string;
+  }) => Promise<boolean>;
+  /** Optional: returns {fingerprint, port, self} for the `get_self` RPC. */
+  getSelfInfo?: () => { name: string; port: number; fingerprint: string };
 }
 
 export class ControlServer {
@@ -36,6 +51,11 @@ export class ControlServer {
   private inbox: CallInbox;
   private config?: Config;
   private getConnection?: (peerName: string) => Connection | undefined;
+  private enterPairingMode?: (seconds: number) => number;
+  private exitPairingMode?: () => void;
+  private isPairingMode?: () => boolean;
+  private addPeer?: ControlServerOptions["addPeer"];
+  private getSelfInfo?: ControlServerOptions["getSelfInfo"];
   private server?: net.Server;
   private pendingInvites: Map<string, IncomingInvite> = new Map();
   private inviteSubscribers: Set<(inv: IncomingInvite) => void> = new Set();
@@ -45,6 +65,11 @@ export class ControlServer {
     this.cm = opts.cm;
     this.config = opts.config;
     this.getConnection = opts.getConnection;
+    this.enterPairingMode = opts.enterPairingMode;
+    this.exitPairingMode = opts.exitPairingMode;
+    this.isPairingMode = opts.isPairingMode;
+    this.addPeer = opts.addPeer;
+    this.getSelfInfo = opts.getSelfInfo;
     this.inbox = new CallInbox(this.cm);
 
     this.cm.on("invite", (inv: InviteEvent) => {
@@ -254,6 +279,40 @@ export class ControlServer {
           calls: this.cm.listCalls().length,
           pending_invites: this.pendingInvites.size,
         };
+      }
+
+      case "enter_pairing_mode": {
+        if (!this.enterPairingMode) throw rpcError("NOT_SUPPORTED", "pairing not wired into this peerd");
+        const seconds = Math.max(5, Number(params.seconds ?? 60));
+        const deadline = this.enterPairingMode(seconds);
+        return { ok: true, expires_at: new Date(deadline).toISOString() };
+      }
+
+      case "exit_pairing_mode": {
+        if (!this.exitPairingMode) throw rpcError("NOT_SUPPORTED", "pairing not wired into this peerd");
+        this.exitPairingMode();
+        return { ok: true };
+      }
+
+      case "is_pairing_mode":
+        return { active: this.isPairingMode ? this.isPairingMode() : false };
+
+      case "add_peer": {
+        if (!this.addPeer) throw rpcError("NOT_SUPPORTED", "addPeer not wired");
+        const ok = await this.addPeer({
+          name: String(params.name ?? ""),
+          host: String(params.host ?? ""),
+          port: Number(params.port ?? 7777),
+          outgoing_token: String(params.outgoing_token ?? ""),
+          inbound_token: String(params.inbound_token ?? ""),
+          fingerprint: String(params.fingerprint ?? ""),
+        });
+        return { ok };
+      }
+
+      case "get_self": {
+        if (!this.getSelfInfo) throw rpcError("NOT_SUPPORTED", "getSelfInfo not wired");
+        return this.getSelfInfo();
       }
 
       default:

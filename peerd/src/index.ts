@@ -1,12 +1,16 @@
 // peerd — agent-to-agent sync daemon
 
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { stringify as stringifyToml } from "@iarna/toml";
 import { loadConfig } from "./config.js";
 import { ensureTls } from "./tls.js";
-import { PeerServer } from "./server.js";
+import { PeerServer, type PairCompleted } from "./server.js";
 import { CallManager } from "./call_manager.js";
 import { ControlServer } from "./control.js";
 import { dialPeer } from "./client.js";
 import type { Connection } from "./connection.js";
+import type { PeerEntry } from "./config.js";
 
 async function main() {
   const config = await loadConfig();
@@ -25,11 +29,59 @@ async function main() {
     stateDir: config.stateDir,
     getConnection: (name) => connections.get(name) ?? undefined,
   });
+  // Persist a freshly paired peer into peers.toml and hot-add to in-memory config.
+  // Both pairing paths (inbound HTTP /pair and CLI-driven outbound `pair` command)
+  // end up calling addPeer to commit the new entry.
+  const addPeer = async (entry: {
+    name: string;
+    host: string;
+    port: number;
+    outgoing_token: string;
+    inbound_token: string;
+    fingerprint: string;
+  }): Promise<boolean> => {
+    try {
+      const peer: PeerEntry = {
+        host: entry.host,
+        port: entry.port,
+        token: entry.outgoing_token,     // token WE present to them
+        inboundToken: entry.inbound_token, // token we EXPECT from them
+        fingerprint: entry.fingerprint,
+      };
+      config.peers[entry.name] = peer;
+      await persistPeersToml(config);
+      console.log(`[peerd] paired with "${entry.name}" at ${entry.host}:${entry.port}`);
+      // Start the outbound dial loop for the new peer.
+      void maintainOutbound(config.self, entry.name, config, connections, callManager);
+      return true;
+    } catch (e: any) {
+      console.error(`[peerd] failed to persist new peer "${entry.name}":`, e?.message ?? e);
+      return false;
+    }
+  };
+
   const controlServer = new ControlServer({
     socketPath: config.controlSocketPath,
     cm: callManager,
     config,
     getConnection: (name) => connections.get(name) ?? undefined,
+    enterPairingMode: (s) => peerServer.enterPairingMode(s),
+    exitPairingMode: () => peerServer.exitPairingMode(),
+    isPairingMode: () => peerServer.isPairing(),
+    addPeer,
+    getSelfInfo: () => ({ name: config.self, port: config.port, fingerprint: tls.fingerprintSha256 }),
+  });
+
+  // When a /pair request succeeds, commit the new peer.
+  peerServer.on("pair_completed", (evt: PairCompleted, ack: (ok: boolean) => void) => {
+    addPeer({
+      name: evt.peer_name,
+      host: evt.peer_host,
+      port: evt.peer_port,
+      outgoing_token: evt.our_outgoing_token, // we will present this TO them
+      inbound_token: evt.peer_outgoing_token, // we will expect this FROM them
+      fingerprint: evt.peer_fingerprint,
+    }).then(ack);
   });
 
   // Wire inbound connections.
@@ -99,6 +151,27 @@ async function maintainOutbound(
       await new Promise((r) => setTimeout(r, 5000));
     }
   }
+}
+
+async function persistPeersToml(config: Awaited<ReturnType<typeof loadConfig>>): Promise<void> {
+  const peersObj: Record<string, Record<string, unknown>> = {};
+  for (const [name, p] of Object.entries(config.peers)) {
+    const entry: Record<string, unknown> = {
+      host: p.host,
+      port: p.port,
+      token: p.token,
+    };
+    if (p.inboundToken) entry.inbound_token = p.inboundToken;
+    if (p.fingerprint) entry.fingerprint = p.fingerprint;
+    peersObj[name] = entry;
+  }
+  const out: any = {
+    self: config.self,
+    port: config.port,
+    peers: peersObj,
+  };
+  const file = path.join(config.stateDir, "peers.toml");
+  await fs.promises.writeFile(file, stringifyToml(out));
 }
 
 main().catch((err) => {
