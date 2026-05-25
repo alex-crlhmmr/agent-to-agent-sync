@@ -238,6 +238,7 @@ After `npm exec peerd init`, the `peerd` CLI is available via `npm exec peerd <c
 | `peerd ready [--seconds N]` | open the local /pair endpoint for N seconds (default 60) |
 | `peerd pair <hostname> [--port P] [--my-host H]` | exchange credentials with the peerd at `<hostname>`; updates `peers.toml` automatically on both sides |
 | `peerd list` | known peers + online state |
+| `peerd sessions` | local claude sessions reachable for calls (those that ran `/make-available-for-call`) |
 | `peerd status` | daemon health, fingerprint, active calls |
 | `peerd remove <peer>` | drop a peer from `peers.toml` |
 | `peerd help` | usage |
