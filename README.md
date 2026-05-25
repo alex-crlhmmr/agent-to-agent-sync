@@ -78,11 +78,8 @@ npm install && npm run build
 ### Step 2 — configure peerd on each machine
 
 ```bash
-# Mac:
-npm exec peerd init --name <your-name> --launchagent
-
-# Ubuntu/Linux: (no LaunchAgent — that's mac-only)
-npm exec peerd init --name <your-name>
+# Same command on macOS and Linux:
+npm exec peerd init --name <your-name> --autostart
 ```
 
 `peerd init`:
@@ -91,19 +88,18 @@ npm exec peerd init --name <your-name>
 - Registers peerd as a user-scoped MCP server in `~/.claude.json`.
 - Symlinks the skills into `~/.claude/skills/`.
 - Appends a `claude` shell alias (adds the `--dangerously-load-development-channels server:peerd` flag automatically).
-- On Mac with `--launchagent`, installs the LaunchAgent so peerd auto-starts at login.
+- With `--autostart`, installs an auto-restart service that brings peerd up at login: **LaunchAgent** on macOS, **systemd user unit** on Linux. Both auto-restart peerd on crash. On Linux, also run `sudo loginctl enable-linger $USER` once if you want peerd to keep running after you log out.
 
 It prints your **peer name**, **reachable-at hostname**, and **TLS fingerprint** — you don't need to share those manually; pairing handles it.
 
 ### Step 3 — start peerd
 
 ```bash
-# Mac with --launchagent: already running. Verify:
+# With --autostart, peerd is already running. Verify:
 peerd status
 
-# Otherwise (Mac without --launchagent, or Linux): start manually
+# Without --autostart: start manually whenever you want to be reachable
 npm run peerd
-# (or background it: nohup npm run peerd > ~/.claude/peerd/peerd.log 2>&1 &)
 ```
 
 ### Step 4 — pair (once per teammate, ever)
@@ -167,7 +163,7 @@ After `npm exec peerd init`, the `peerd` CLI is available via `npm exec peerd <c
 
 | | |
 |---|---|
-| `peerd init [--name N] [--launchagent] [--no-alias]` | turnkey setup |
+| `peerd init [--name N] [--autostart] [--no-alias]` | turnkey setup; `--autostart` installs a LaunchAgent (macOS) or systemd user unit (Linux) so peerd auto-starts at login |
 | `peerd ready [--seconds N]` | open the local /pair endpoint for N seconds (default 60) |
 | `peerd pair <hostname> [--port P] [--my-host H]` | exchange credentials with the peerd at `<hostname>`; updates `peers.toml` automatically on both sides |
 | `peerd list` | known peers + online state |

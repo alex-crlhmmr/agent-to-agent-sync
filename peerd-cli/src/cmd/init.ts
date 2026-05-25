@@ -24,7 +24,7 @@ const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
 
 interface Opts {
   name?: string;
-  launchagent?: boolean;
+  autostart?: boolean;
   noAlias?: boolean;
 }
 
@@ -33,7 +33,9 @@ function parseOpts(args: string[]): Opts {
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--name") o.name = args[++i];
-    else if (a === "--launchagent") o.launchagent = true;
+    // --autostart: cross-platform (LaunchAgent on macOS, systemd user unit on Linux).
+    // --launchagent kept as a back-compat alias.
+    else if (a === "--autostart" || a === "--launchagent") o.autostart = true;
     else if (a === "--no-alias") o.noAlias = true;
   }
   return o;
@@ -215,42 +217,17 @@ export async function cmdInit(args: string[]): Promise<number> {
     }
   }
 
-  // ── 8. LaunchAgent ─────────────────────────────────────────────
+  // ── 8. Autostart (macOS LaunchAgent OR Linux systemd user unit) ─
   log("");
-  log("step 7/7: LaunchAgent…");
-  if (opts.launchagent && process.platform === "darwin") {
-    const plistPath = path.join(HOME, "Library", "LaunchAgents", "com.peerd.daemon.plist");
-    const peerdEntry = path.join(REPO_ROOT, "peerd", "dist", "index.js");
-    if (!fs.existsSync(peerdEntry)) {
-      log(`  ! peerd built? expected ${peerdEntry}. Skipping LaunchAgent.`);
-    } else {
-      const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.peerd.daemon</string>
-  <key>ProgramArguments</key>
-  <array><string>${process.execPath}</string><string>${peerdEntry}</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${path.join(STATE_DIR, "peerd.log")}</string>
-  <key>StandardErrorPath</key><string>${path.join(STATE_DIR, "peerd.err.log")}</string>
-  <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
-</dict>
-</plist>
-`;
-      fs.mkdirSync(path.dirname(plistPath), { recursive: true });
-      fs.writeFileSync(plistPath, plist);
-      spawnSync("launchctl", ["unload", plistPath], { stdio: "ignore" });
-      const r = spawnSync("launchctl", ["load", plistPath]);
-      if (r.status === 0) log(`  ✓ LaunchAgent loaded (peerd auto-starts at login)`);
-      else log(`  ! launchctl load failed — run manually: launchctl load ${plistPath}`);
-    }
-  } else if (opts.launchagent) {
-    log(`  - LaunchAgent only supported on macOS, skipped`);
+  log("step 7/7: autostart…");
+  if (!opts.autostart) {
+    log(`  - skipped (pass --autostart to keep peerd running across reboots)`);
+  } else if (process.platform === "darwin") {
+    installLaunchAgentMac(STATE_DIR, log);
+  } else if (process.platform === "linux") {
+    installSystemdUnitLinux(STATE_DIR, log);
   } else {
-    log(`  - skipped (pass --launchagent to install peerd as a LaunchAgent)`);
+    log(`  - --autostart not supported on ${process.platform}; skipped`);
   }
 
   // ── Summary ────────────────────────────────────────────────────
@@ -264,9 +241,12 @@ export async function cmdInit(args: string[]): Promise<number> {
   log(`  Reachable at:     ${myHost}:7777`);
   log(`  TLS fingerprint:  ${tls.fingerprintSha256}`);
   log("");
-  if (!opts.launchagent) {
+  if (!opts.autostart) {
     log("Start peerd manually whenever you want to be reachable:");
     log(`  cd ${JSON.stringify(REPO_ROOT)} && npm run peerd`);
+    log("");
+    log("Or re-run init with --autostart to install an auto-restart service:");
+    log(`  ${process.platform === "linux" ? "(systemd user unit)" : process.platform === "darwin" ? "(macOS LaunchAgent)" : "(supported on macOS + Linux)"}`);
     log("");
   }
   log("To pair with a teammate (do this with them ONCE per teammate):");
@@ -321,4 +301,94 @@ function upsertHook(existing: unknown, commandFragment: string): any[] {
     hooks: [{ type: "command", command: commandFragment, timeout: 5 }],
   });
   return arr;
+}
+
+function installLaunchAgentMac(stateDir: string, log: (...a: unknown[]) => void): void {
+  const plistPath = path.join(HOME, "Library", "LaunchAgents", "com.peerd.daemon.plist");
+  const peerdEntry = path.join(REPO_ROOT, "peerd", "dist", "index.js");
+  if (!fs.existsSync(peerdEntry)) {
+    log(`  ! peerd built? expected ${peerdEntry}. Skipping autostart.`);
+    return;
+  }
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.peerd.daemon</string>
+  <key>ProgramArguments</key>
+  <array><string>${process.execPath}</string><string>${peerdEntry}</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${path.join(stateDir, "peerd.log")}</string>
+  <key>StandardErrorPath</key><string>${path.join(stateDir, "peerd.err.log")}</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+</dict>
+</plist>
+`;
+  fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+  fs.writeFileSync(plistPath, plist);
+  spawnSync("launchctl", ["unload", plistPath], { stdio: "ignore" });
+  const r = spawnSync("launchctl", ["load", plistPath]);
+  if (r.status === 0) log(`  ✓ LaunchAgent loaded (peerd auto-starts at login + auto-restarts on crash)`);
+  else log(`  ! launchctl load failed — run manually: launchctl load ${plistPath}`);
+}
+
+function installSystemdUnitLinux(stateDir: string, log: (...a: unknown[]) => void): void {
+  const peerdEntry = path.join(REPO_ROOT, "peerd", "dist", "index.js");
+  if (!fs.existsSync(peerdEntry)) {
+    log(`  ! peerd built? expected ${peerdEntry}. Skipping autostart.`);
+    return;
+  }
+  // Use absolute node path so the unit doesn't depend on the user's PATH.
+  const nodeBin = process.execPath;
+  const nodeDir = path.dirname(nodeBin);
+  const unitPath = path.join(HOME, ".config", "systemd", "user", "peerd.service");
+
+  const unit = `[Unit]
+Description=peerd — agent-to-agent sync daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${REPO_ROOT}
+ExecStart=${nodeBin} ${peerdEntry}
+Restart=always
+RestartSec=5
+StandardOutput=append:${path.join(stateDir, "peerd.log")}
+StandardError=append:${path.join(stateDir, "peerd.err.log")}
+Environment=PATH=${nodeDir}:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+`;
+
+  fs.mkdirSync(path.dirname(unitPath), { recursive: true });
+  fs.writeFileSync(unitPath, unit);
+  log(`  ✓ wrote ${unitPath}`);
+
+  // Reload + enable + start. If systemctl isn't available, fall through to
+  // printing manual instructions.
+  if (spawnSync("which", ["systemctl"]).status !== 0) {
+    log(`  ! systemctl not found. Start peerd manually with: npm run peerd`);
+    return;
+  }
+  const reload = spawnSync("systemctl", ["--user", "daemon-reload"]);
+  if (reload.status !== 0) {
+    log(`  ! systemctl --user daemon-reload failed; you may need to run it yourself`);
+  }
+  const enable = spawnSync("systemctl", ["--user", "enable", "--now", "peerd"]);
+  if (enable.status === 0) {
+    log(`  ✓ systemd user unit enabled + started (peerd auto-starts at login + auto-restarts on crash)`);
+  } else {
+    log(`  ! 'systemctl --user enable --now peerd' failed. Try manually:`);
+    log(`     systemctl --user daemon-reload`);
+    log(`     systemctl --user enable --now peerd`);
+  }
+
+  // Optional but recommended: enable-linger so peerd survives full logout.
+  // We don't run this — it needs sudo. Just tell the user.
+  log(`  ! to keep peerd running even when you're logged out, run once:`);
+  log(`     sudo loginctl enable-linger $USER`);
 }

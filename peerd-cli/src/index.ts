@@ -11,10 +11,13 @@ import { cmdReady } from "./cmd/ready.js";
 const HELP = `peerd — agent-to-agent sync CLI
 
 Usage:
-  peerd init [--name <name>] [--no-launchagent] [--no-alias]
-      Configure this machine: write Claude Code settings, generate TLS cert,
-      start the daemon (as LaunchAgent unless --no-launchagent), and add a
-      shell alias so 'claude' loads the peerd channel by default.
+  peerd init [--name <name>] [--autostart] [--no-alias]
+      Configure this machine: generate TLS cert, write Claude Code settings
+      (hooks + statusLine + permissions), register the MCP server, symlink
+      skills, and add a shell alias for 'claude'.
+      --autostart  install a service so peerd auto-starts at login and
+                   auto-restarts on crash (LaunchAgent on macOS, systemd
+                   user unit on Linux). --launchagent is a back-compat alias.
 
   peerd ready [--seconds <N>]
       Put this peerd into pairing-receive mode for N seconds (default 60).

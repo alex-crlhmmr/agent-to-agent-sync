@@ -16,6 +16,8 @@
     "cli": "npm run start -w peerd-cli --",
     "wire-claude-code": "node install.mjs",
     "wire-claude-code:launchagent": "node install.mjs --launchagent",
+    "peerd-init": "npm exec peerd init --",
+    "peerd-init:autostart": "npm exec peerd init -- --autostart",
     "local-test": "node local-test-setup.mjs"
   },
   "devDependencies": {
