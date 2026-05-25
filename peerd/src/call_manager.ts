@@ -597,13 +597,21 @@ export class CallManager extends EventEmitter {
   }
 
   private async handleIncomingShareFile(conn: Connection, cid: string, env: Envelope): Promise<void> {
+    console.error(`[cm] inbound SHARE_FILE call=${cid} from=${env.from} seq=${env.seq}`);
     const call = this.calls.get(cid);
-    if (!call || call.state !== "CONNECTED") {
-      conn.send(errorEnvelope(this.selfName, ErrorCode.UNKNOWN_CALL, "no such connected call", { call_id: cid }));
+    if (!call) {
+      console.error(`[cm] SHARE_FILE: unknown call ${cid}; have calls=[${Array.from(this.calls.keys()).join(",")}]`);
+      conn.send(errorEnvelope(this.selfName, ErrorCode.UNKNOWN_CALL, "no such call", { call_id: cid }));
+      return;
+    }
+    if (call.state !== "CONNECTED") {
+      console.error(`[cm] SHARE_FILE: call ${cid} not CONNECTED (state=${call.state})`);
+      conn.send(errorEnvelope(this.selfName, ErrorCode.UNKNOWN_CALL, `call in state ${call.state}`, { call_id: cid }));
       return;
     }
     const senderRole = env.from === call.caller ? "caller" : "callee";
     if (call.floor !== senderRole) {
+      console.error(`[cm] SHARE_FILE: OUT_OF_TURN (floor=${call.floor}, sender=${senderRole})`);
       conn.send(errorEnvelope(this.selfName, ErrorCode.OUT_OF_TURN, "floor mismatch", { call_id: cid, in_response_to_seq: env.seq }));
       return;
     }
@@ -618,6 +626,7 @@ export class CallManager extends EventEmitter {
       from: env.from,
       payload: env.payload as ShareFilePayload,
     };
+    console.error(`[cm] emitting file_shared message event for call ${cid}`);
     this.emit("message", evt);
   }
 
