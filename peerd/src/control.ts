@@ -58,7 +58,7 @@ export class ControlServer {
   private getSelfInfo?: ControlServerOptions["getSelfInfo"];
   private server?: net.Server;
   private pendingInvites: Map<string, IncomingInvite> = new Map();
-  private inviteSubscribers: Set<(inv: IncomingInvite) => void> = new Set();
+  private inviteSubscribers: Set<(inv: IncomingInvite, silent: boolean) => void> = new Set();
   private inviteResolvedSubscribers: Set<(evt: { call_id: string; resolution: "accepted" | "declined" | "ended" }) => void> = new Set();
 
   constructor(opts: ControlServerOptions) {
@@ -83,8 +83,14 @@ export class ControlServer {
         received_at: new Date().toISOString(),
       };
       this.pendingInvites.set(inv.call_id, stored);
+      // Only the FIRST (oldest) subscriber gets a non-silent popup. All other
+      // subscribed sessions receive the invite marked `silent: true` so they
+      // can track it for state purposes but don't pop a UI. This avoids the
+      // multi-claude-session "everyone gets a popup" problem.
+      let isFirst = true;
       for (const cb of this.inviteSubscribers) {
-        try { cb(stored); } catch { /* ignore */ }
+        try { cb(stored, !isFirst); } catch { /* ignore */ }
+        isFirst = false;
       }
       notify({
         title: `📞 ${inv.from}@${inv.caller_label}`,
@@ -209,21 +215,23 @@ export class ControlServer {
       case "subscribe_inbox": {
         // Stream notifications for new invites until the client disconnects.
         // For REPLAY (invites that were already pending when this subscriber
-        // connected), mark `replay_silent: true` if there's already at least one
-        // other subscriber — they're presumably handling the popup, and a second
-        // popup would be redundant. If this is the FIRST subscriber, the replay
-        // is the real popup surface, so deliver it normally.
+        // connected), mark `silent: true` if there's already at least one
+        // other subscriber — they're presumably handling the popup. If this
+        // is the FIRST subscriber, the replay is the real popup surface, so
+        // deliver it normally.
         const isFirstSubscriber = this.inviteSubscribers.size === 0;
         for (const inv of this.pendingInvites.values()) {
           hooks.writeNotification({
             kind: "invite",
             payload: inv,
-            replay_silent: !isFirstSubscriber,
+            silent: !isFirstSubscriber,
           });
         }
-        const inviteCb = (inv: IncomingInvite) => {
-          // Fresh invites (broadcast as they arrive) always go through.
-          hooks.writeNotification({ kind: "invite", payload: inv });
+        // Fresh invites: callback receives a `silent` flag determined by the
+        // dispatch loop in cm.on("invite") — only the first/oldest subscriber
+        // gets silent=false.
+        const inviteCb = (inv: IncomingInvite, silent: boolean) => {
+          hooks.writeNotification({ kind: "invite", payload: inv, silent });
         };
         const resolvedCb = (evt: { call_id: string; resolution: "accepted" | "declined" | "ended" }) => {
           hooks.writeNotification({ kind: "invite_resolved", payload: evt });
