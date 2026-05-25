@@ -107,10 +107,13 @@ async function main() {
         "You are connected to peerd — a peer-to-peer chat bridge between developer agents.\n\n" +
         "Incoming events from other developers' agents arrive as <channel source=\"peerd\" ...> blocks. ACT IMMEDIATELY based on the `kind` meta attribute — no narration, no asking the user before driving the right tool.\n\n" +
         "Channel event kinds:\n" +
-        "  - invite:    A peer is calling. Use the AskUserQuestion tool to present the user with three options: 'Accept', 'Decline', 'Decline & send a message'. The question text should be \"📞 <from> is calling — \\\"<topic>\\\"\" plus the context_excerpt if present. Based on the user's pick:\n" +
-        "      * Accept → call mcp__peerd__peer_accept_invite with the call_id from the meta. Then handle the subsequent \"connected\" event by calling peer_recv.\n" +
-        "      * Decline → call mcp__peerd__peer_deny_invite with the call_id.\n" +
-        "      * Decline & send a message → ask the user for the message text (another AskUserQuestion or a text prompt), then call peer_deny_invite with `reason` set to that text.\n" +
+        "  - invite:    A peer is calling. THIS IS A TWO-STEP PROCESS — you MUST do both steps:\n" +
+        "       STEP 1: Call AskUserQuestion with options 'Accept', 'Decline', 'Decline & send a message'. The question text should be \"📞 <from> is calling — \\\"<topic>\\\"\" plus the context_excerpt if present.\n" +
+        "       STEP 2: Look at the user's answer and IMMEDIATELY (do not narrate, do not wait for anything) make ONE tool call:\n" +
+        "         * If 'Accept' → call mcp__peerd__peer_accept_invite with the call_id from the meta. CRITICAL: the popup is only a UI question; peerd does NOT know the user accepted until you call peer_accept_invite. If you skip this tool call, the call will time out and the peer will think you ignored them.\n" +
+        "         * If 'Decline' → call mcp__peerd__peer_deny_invite with the call_id.\n" +
+        "         * If 'Decline & send a message' → ask the user for the message text (another AskUserQuestion or a chat prompt), then call peer_deny_invite with `reason` set to that text.\n" +
+        "       After Accept, you will then receive a 'connected' channel event — that's your cue to call peer_recv. Until then, just wait — but DO NOT skip Step 2.\n" +
         "  - invite_cancelled: A call that you had received an `invite` for has been resolved in ANOTHER Claude Code session (the user accepted or declined there, or it timed out). If you have NOT yet called AskUserQuestion for this call_id, silently ignore — do not pop the question. If you already DID call AskUserQuestion, the popup remains open until the user presses Esc (Claude Code can't close popups externally); mention briefly in your next message that the call has been resolved elsewhere, then don't drive it.\n" +
         "  - connected: A call is now active. The caller has the floor. Call mcp__peerd__peer_recv immediately with the call_id to receive their opening message, then reason and call peer_send to reply. Continue the recv/send loop until either side calls peer_end (you'll see kind=\"ended\").\n" +
         "  - message:   A new message arrived on an active call. Call peer_recv to pull it.\n" +
@@ -141,7 +144,7 @@ async function main() {
         topic: z.string().describe("Short topic, shown on the callee's incoming-call popup."),
         caller_label: z.string().optional().describe("How to identify yourself (e.g., \"bob@layer-b\")."),
         context_excerpt: z.string().optional().describe("1-3 sentences of context shown to the callee in the popup."),
-        timeout_s: z.number().int().min(5).max(600).optional().describe("How long (seconds) to wait for the peer to accept before timing out. Default 150 (2.5 minutes). Use a shorter value when the user wants a quick answer; a longer value when they expect the peer to be slow to respond."),
+        timeout_s: z.number().int().min(5).max(600).optional().describe("How long (seconds) to wait for the peer to ACCEPT the call before timing out. This is about the peer's response speed, NOT about the topic. Default 150 (2.5 minutes) — leave it unset in almost all cases. Only set if the user explicitly gave a time window (e.g. 'wait only 30s', 'give him 5 min'). DO NOT shorten just because the topic contains words like 'quick' — those describe the call's subject, not impatience with the peer."),
       },
     },
     async (input) => {

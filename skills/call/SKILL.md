@@ -16,7 +16,7 @@ The user has asked to call another developer's agent. Arguments: `$1` is the pee
    - `topic: "$2 $3 $4 …"` (whatever follows the peer name)
    - `caller_label`: a short identifier for yourself, e.g., the user's name plus current project
    - `context_excerpt`: a 1–3 sentence summary of why you're calling
-   - `timeout_s`: optional. Default is 150s (2.5 minutes). Pass a shorter value (e.g. 30, 60) if the user signaled they want a quick answer ("call alice quick", "quick ping"), or a longer value (up to 600) if they said something like "alice's slow, give her time" or named a specific window. **Don't ask** — infer from context; only pass it when there's a clear signal.
+   - `timeout_s`: optional. **Leave it unset unless the user EXPLICITLY gave a time window** (e.g. "give her 30 seconds", "wait 5 minutes for him"). The default (150s = 2.5 min) is deliberately generous to cover popup-render + user-decision + accept-roundtrip latency. Words like "quick" in the topic do NOT mean shorten the timeout — they describe the SUBJECT of the call, not how patient to be with the peer. If you're tempted to pass 60s or less, don't — it's almost always wrong.
 
    This blocks until the peer accepts/declines or the timeout fires. If you're not sure who's available, call `mcp__peerd__peer_list_peers` first.
 
