@@ -348,6 +348,14 @@ async function startChannelBridge(server: McpServer, client: PeerdClient): Promi
     if (note?.kind === "invite") {
       const inv = note.payload;
       if (!inv?.call_id || invitedSeen.has(inv.call_id)) return;
+      // If this is a "silent replay" — peerd is telling us about an invite that
+      // existed before our session subscribed AND another session is already
+      // subscribed — skip showing a popup. Another session is presumably
+      // handling it; a second popup here would be redundant noise.
+      const noteAny = note as { replay_silent?: boolean };
+      if (noteAny.replay_silent) {
+        return;
+      }
       // Race-guard: if peerd already told us this invite was resolved in another
       // session, just suppress entirely — never emit anything.
       if (resolvedBeforeEmit.has(inv.call_id)) {

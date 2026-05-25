@@ -208,10 +208,21 @@ export class ControlServer {
 
       case "subscribe_inbox": {
         // Stream notifications for new invites until the client disconnects.
+        // For REPLAY (invites that were already pending when this subscriber
+        // connected), mark `replay_silent: true` if there's already at least one
+        // other subscriber — they're presumably handling the popup, and a second
+        // popup would be redundant. If this is the FIRST subscriber, the replay
+        // is the real popup surface, so deliver it normally.
+        const isFirstSubscriber = this.inviteSubscribers.size === 0;
         for (const inv of this.pendingInvites.values()) {
-          hooks.writeNotification({ kind: "invite", payload: inv });
+          hooks.writeNotification({
+            kind: "invite",
+            payload: inv,
+            replay_silent: !isFirstSubscriber,
+          });
         }
         const inviteCb = (inv: IncomingInvite) => {
+          // Fresh invites (broadcast as they arrive) always go through.
           hooks.writeNotification({ kind: "invite", payload: inv });
         };
         const resolvedCb = (evt: { call_id: string; resolution: "accepted" | "declined" | "ended" }) => {
