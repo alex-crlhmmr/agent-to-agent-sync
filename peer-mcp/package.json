@@ -1,0 +1,23 @@
+{
+  "name": "peer-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code MCP server for peerd",
+  "type": "module",
+  "bin": {
+    "peer-mcp": "./dist/index.js",
+    "peer-check-inbox": "./dist/check_inbox.js",
+    "peer-precheck": "./dist/precheck.js",
+    "peer-status-line": "./dist/status_line.js",
+    "peer-notify": "./dist/notify.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^4.4.3"
+  }
+}

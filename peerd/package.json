@@ -1,0 +1,25 @@
+{
+  "name": "peerd",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent-to-agent sync daemon",
+  "type": "module",
+  "bin": {
+    "peerd": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "selfsigned": "^5.5.0",
+    "ulidx": "^2.4.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.13"
+  }
+}

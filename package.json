@@ -1,0 +1,24 @@
+{
+  "name": "peerd-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Direct agent-to-agent communication between Claude Code instances over LAN/Tailscale.",
+  "workspaces": [
+    "peerd",
+    "peer-mcp"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "peerd": "npm run start -w peerd",
+    "peerd:dev": "npm run dev -w peerd",
+    "mcp": "npm run start -w peer-mcp",
+    "wire-claude-code": "node install.mjs",
+    "wire-claude-code:launchagent": "node install.mjs --launchagent",
+    "local-test": "node local-test-setup.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.7.0"
+  }
+}
