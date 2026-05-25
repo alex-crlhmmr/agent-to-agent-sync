@@ -84,6 +84,12 @@ function resolvePeer(input: string, peers: PeerEntry[]): { name: string; auto_co
   return { name: best.name, auto_corrected: { from: input, distance: bestDist } };
 }
 
+// Tracks call_ids that THIS session resolved locally (accepted or denied).
+// When we later receive the corresponding invite_resolved broadcast from
+// peerd, we suppress it — we already know what happened; no need to fire a
+// self-canceling channel block that confuses the agent.
+const handledLocally = new Set<string>();
+
 async function main() {
   const client = await PeerdClient.connect(SOCKET_PATH).catch((err) => {
     console.error(`[peer-mcp] failed to connect to peerd at ${SOCKET_PATH}: ${err.message}`);
@@ -206,25 +212,31 @@ async function main() {
   server.registerTool(
     "peer_accept_invite",
     {
-      description: "Accept a pending incoming invite by call_id. Usually the ambient popup already handles this — only call this tool directly if the user explicitly says to accept a specific call_id, or if the popup was dismissed and you need to recover.",
+      description: "Accept a pending incoming invite by call_id. Call this after the AskUserQuestion popup returns 'Accept'. The popup is only UI; peerd does NOT know the user accepted until you call this tool.",
       inputSchema: {
         call_id: z.string(),
       },
     },
-    async ({ call_id }) => asTextResult(await client.call("accept_invite", { call_id })),
+    async ({ call_id }) => {
+      handledLocally.add(call_id); // suppress self-broadcast of invite_resolved
+      return asTextResult(await client.call("accept_invite", { call_id }));
+    },
   );
 
   // ── peer_deny_invite ───────────────────────────────────────────
   server.registerTool(
     "peer_deny_invite",
     {
-      description: "Decline a pending invite by call_id. Usually the ambient popup already handles this.",
+      description: "Decline a pending invite by call_id. Call this after the AskUserQuestion popup returns 'Decline' or 'Decline & send a message' (with the user's text as `reason`).",
       inputSchema: {
         call_id: z.string(),
         reason: z.string().optional(),
       },
     },
-    async ({ call_id, reason }) => asTextResult(await client.call("deny_invite", { call_id, reason })),
+    async ({ call_id, reason }) => {
+      handledLocally.add(call_id); // suppress self-broadcast of invite_resolved
+      return asTextResult(await client.call("deny_invite", { call_id, reason }));
+    },
   );
 
   // ── peer_recv ──────────────────────────────────────────────────
@@ -362,6 +374,13 @@ async function startChannelBridge(server: McpServer, client: PeerdClient): Promi
     if (note?.kind === "invite_resolved") {
       const { call_id, resolution } = note.payload as { call_id: string; resolution: string };
       if (!call_id) return;
+      // Suppress self-broadcast: if THIS session called accept_invite / deny_invite,
+      // we already know how the invite was resolved; don't emit a confusing
+      // "accepted in another session" channel block to our own agent.
+      if (handledLocally.has(call_id)) {
+        handledLocally.delete(call_id);
+        return;
+      }
       if (invitedSeen.has(call_id)) {
         // We already emitted the invite event in this session — push a
         // cancellation block so the agent can abandon the popup logic if
