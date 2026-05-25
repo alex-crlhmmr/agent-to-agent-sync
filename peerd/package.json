@@ -4,9 +4,6 @@
   "private": true,
   "description": "Agent-to-agent sync daemon",
   "type": "module",
-  "bin": {
-    "peerd": "./dist/index.js"
-  },
   "main": "./dist/index.js",
   "scripts": {
     "build": "tsc",
