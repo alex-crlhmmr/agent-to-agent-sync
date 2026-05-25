@@ -83,15 +83,15 @@ export class ControlServer {
         received_at: new Date().toISOString(),
       };
       this.pendingInvites.set(inv.call_id, stored);
-      // Only the FIRST (oldest) subscriber gets a non-silent popup. All other
-      // subscribed sessions receive the invite marked `silent: true` so they
-      // can track it for state purposes but don't pop a UI. This avoids the
-      // multi-claude-session "everyone gets a popup" problem.
-      let isFirst = true;
-      for (const cb of this.inviteSubscribers) {
-        try { cb(stored, !isFirst); } catch { /* ignore */ }
-        isFirst = false;
-      }
+      // Only the NEWEST (most recently subscribed) session gets a non-silent
+      // popup. All older sessions receive the invite marked `silent: true`
+      // so they don't pop a UI. Maps to "the claude I just opened is the one
+      // I'm at the keyboard for."
+      const subs = Array.from(this.inviteSubscribers);
+      subs.forEach((cb, idx) => {
+        const isNewest = idx === subs.length - 1;
+        try { cb(stored, !isNewest); } catch { /* ignore */ }
+      });
       notify({
         title: `📞 ${inv.from}@${inv.caller_label}`,
         subtitle: inv.topic,
@@ -214,17 +214,17 @@ export class ControlServer {
 
       case "subscribe_inbox": {
         // Stream notifications for new invites until the client disconnects.
-        // For REPLAY (invites that were already pending when this subscriber
-        // connected), mark `silent: true` if there's already at least one
-        // other subscriber — they're presumably handling the popup. If this
-        // is the FIRST subscriber, the replay is the real popup surface, so
-        // deliver it normally.
-        const isFirstSubscriber = this.inviteSubscribers.size === 0;
+        // For REPLAY (invites pending before this subscriber connected): a
+        // newly-opening session is the freshest, so it gets a NON-silent popup.
+        // Older sessions that already received the invite either still have
+        // their popup open (can't close it from MCP — user Escs) or already
+        // dismissed it. Either way: the user just opened a new claude, so
+        // route the popup there.
         for (const inv of this.pendingInvites.values()) {
           hooks.writeNotification({
             kind: "invite",
             payload: inv,
-            silent: !isFirstSubscriber,
+            silent: false,
           });
         }
         // Fresh invites: callback receives a `silent` flag determined by the
