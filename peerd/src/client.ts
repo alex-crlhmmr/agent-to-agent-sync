@@ -24,6 +24,9 @@ export async function dialPeer(opts: DialOptions): Promise<Connection> {
     },
     rejectUnauthorized: false,
     handshakeTimeout: 10_000,
+    // Match server-side maxPayload so FETCH_RESPONSE for large refs (up to
+    // 10 MiB content + envelope) doesn't get clipped client-side.
+    maxPayload: 16 * 1024 * 1024,
   });
 
   return new Promise((resolve, reject) => {

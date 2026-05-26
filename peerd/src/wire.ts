@@ -7,7 +7,10 @@ import {
 } from "./types.js";
 import { nowIso } from "./ids.js";
 
-export const MAX_FRAME_BYTES = 1 * 1024 * 1024; // 1 MiB per spec
+// 16 MiB — comfortably above SHARE_FILE_REF_MAX_BYTES (10 MiB) + JSON envelope
+// overhead. The PROTOCOL.md §2 originally said 1 MiB before we lifted the
+// share_file_ref cap; raised here to keep the wire usable for large refs.
+export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
 export function encode<T>(env: Envelope<T>): string {
   return JSON.stringify(env);
