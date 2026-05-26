@@ -67,13 +67,15 @@ npm run local-test
 
 Three commands per machine + one pairing exchange. The `peerd` CLI handles all the credential exchange + config wiring; no hand-editing.
 
-### Step 1 — install on each machine (mac AND/OR linux)
+### Step 1 — install on each machine (macOS / Linux / Windows)
 
 ```bash
 git clone https://github.com/alex-crlhmmr/agent-to-agent-sync.git
 cd agent-to-agent-sync
 npm install && npm run build
 ```
+
+Windows is supported alongside macOS and Linux. See [Windows notes](#windows-notes) below for the differences (PowerShell `$PROFILE` aliases instead of `.zshrc`, Startup-folder shortcut instead of systemd, copy-mode for skills unless Developer Mode is on).
 
 ### Step 2 — configure peerd on each machine
 
@@ -91,8 +93,8 @@ npm exec peerd -- init --name <your-name> --autostart
 - Wires `~/.claude/settings.json` (hooks, status line, permissions for peerd MCP tools + skills).
 - Registers peerd as a user-scoped MCP server in `~/.claude.json`.
 - Symlinks the skills into `~/.claude/skills/`.
-- Appends a `claude` shell alias to your `.zshrc` / `.bashrc` / `.bash_profile` (whichever exist). The alias adds `--dangerously-load-development-channels server:peerd` automatically.
-- With `--autostart`, installs an auto-restart service that brings peerd up at login: **LaunchAgent** on macOS, **systemd user unit** on Linux. Both auto-restart peerd on crash.
+- Appends `claude` + `peerd` shell aliases to your shell rc (POSIX `.zshrc` / `.bashrc` / `.bash_profile`, or PowerShell `$PROFILE` on Windows). The alias adds `--dangerously-load-development-channels server:peerd` automatically.
+- With `--autostart`, installs an auto-restart service that brings peerd up at login: **LaunchAgent** on macOS, **systemd user unit** on Linux, **Startup-folder `.cmd` shortcut** on Windows. macOS/Linux auto-restart peerd on crash; Windows runs once per logon (no supervision).
 
 It prints your **peer name**, **reachable-at hostname**, and **TLS fingerprint** — you don't need to share those manually; pairing handles it.
 
@@ -103,6 +105,17 @@ If you want peerd to keep running after you log out of the desktop session:
 sudo loginctl enable-linger $USER
 ```
 Without this, the systemd user units shut down when your last session ends — peerd would only run while you're logged in.
+
+#### Windows notes
+
+`peerd init` works on Windows (PowerShell or PowerShell 7) with these per-platform behaviors:
+
+- **Shell aliases** are written to `$PROFILE` as PowerShell `function`s (both Windows PowerShell 5.1 and PowerShell 7 profiles are written if their `Documents\(Windows)PowerShell\` directories exist). If PowerShell blocks the profile, run once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+- **Skills** are normally symlinked into `~\.claude\skills\`. Windows requires either admin rights or **Developer Mode** (Settings → For Developers → Developer Mode) for `mklink`-style symlinks. If neither is available, `peerd init` falls back to copying the skill directories and prints a warning. Re-run `peerd init` after editing files under `skills/` to refresh the copies.
+- **Autostart** drops a `peerd.cmd` into your Startup folder (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`). It runs once at logon and does not auto-restart on crash — if you want supervision, run peerd under [nssm](https://nssm.cc/) or `node-windows`.
+- **macOS-native notifications** are disabled (osascript is mac-only). Status line + Stop hook still work the same way.
+- **Cross-OS pairing**: prefer Tailscale MagicDNS hostnames (`bob.tailnet-name.ts.net`) over `<host>.local`. Windows doesn't ship Bonjour, so `.local` mDNS resolution usually fails for peers on the other side.
+- **WSL2 alternative**: if you'd rather follow the Linux install path, install WSL2 Ubuntu and run `peerd init` inside it. The systemd user-unit autostart works in WSL2 just like on native Linux.
 
 ### Step 3 — start peerd
 

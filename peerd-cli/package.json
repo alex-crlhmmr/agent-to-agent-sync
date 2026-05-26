@@ -9,7 +9,7 @@
   },
   "main": "./dist/index.js",
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js",
+    "build": "tsc && node -e \"try{require('fs').chmodSync('dist/index.js',0o755)}catch(e){}\"",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts"
   },

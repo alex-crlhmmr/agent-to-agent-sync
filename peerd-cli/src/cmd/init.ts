@@ -5,9 +5,9 @@
 //   3. Wire ~/.claude/settings.json: hooks (UserPromptSubmit, Stop), statusLine,
 //      and permissions (peerd MCP tools auto-approved, skills auto-approved).
 //   4. Wire ~/.claude.json (or fall back to ~/.claude/settings.json): mcpServers.peerd.
-//   5. Symlink skills/ into ~/.claude/skills/.
-//   6. Append a shell alias for `claude` so `--dangerously-load-development-channels server:peerd` is invisible.
-//   7. Optionally install a LaunchAgent so peerd auto-starts at login (--launchagent).
+//   5. Symlink skills/ into ~/.claude/skills/ (copy fallback on Windows w/o symlink perms).
+//   6. Append shell aliases for `claude` + `peerd` (POSIX rc files OR PowerShell $PROFILE).
+//   7. Optionally install autostart (macOS LaunchAgent / Linux systemd user / Windows Startup folder).
 //   8. Print a peer-id summary + the exact pair command teammates should run.
 
 import * as fs from "node:fs";
@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { detectMyHostname } from "../lib/hostname.js";
+import { IS_LINUX, IS_MAC, IS_WIN, symlinkOrCopyDir, whichSync } from "../lib/platform.js";
 
 const HOME = os.homedir();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -41,10 +42,9 @@ function parseOpts(args: string[]): Opts {
   return o;
 }
 
+// `which`/`where` proxy that works cross-platform. Returns absolute path or null.
 function which(cmd: string): string | null {
-  const r = spawnSync("which", [cmd], { encoding: "utf8" });
-  if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
-  return null;
+  return whichSync(cmd);
 }
 
 export async function cmdInit(args: string[]): Promise<number> {
@@ -75,8 +75,11 @@ export async function cmdInit(args: string[]): Promise<number> {
   if (tailscaleBin) log(`  ✓ tailscale → ${tailscaleBin}`);
   else log(`  ! tailscale not installed (optional, but recommended for cross-network calls)`);
 
-  if (process.platform !== "darwin") {
-    log(`  ! non-mac platform (${process.platform}); notifications + LaunchAgent disabled`);
+  if (!IS_MAC) {
+    log(`  ! non-mac platform (${process.platform}); native macOS notifications disabled`);
+  }
+  if (IS_WIN) {
+    log(`  ! Windows: skill files will be COPIED (not symlinked) unless Developer Mode is on; cross-OS pairing prefers Tailscale MagicDNS over <host>.local`);
   }
 
   // ── 2. State dirs + TLS ────────────────────────────────────────
@@ -195,6 +198,7 @@ export async function cmdInit(args: string[]): Promise<number> {
   const SKILLS_DIR = path.join(HOME, ".claude", "skills");
   fs.mkdirSync(SKILLS_DIR, { recursive: true });
   const srcSkills = path.join(REPO_ROOT, "skills");
+  let anyCopied = false;
   for (const name of fs.readdirSync(srcSkills)) {
     const src = path.join(srcSkills, name);
     const dst = path.join(SKILLS_DIR, name);
@@ -205,8 +209,14 @@ export async function cmdInit(args: string[]): Promise<number> {
       log(`  ! ${name} already exists at ${dst}; leaving alone`);
       continue;
     }
-    fs.symlinkSync(src, dst, "dir");
-    log(`  ✓ symlinked ${name}`);
+    const mode = symlinkOrCopyDir(src, dst);
+    if (mode === "copy") anyCopied = true;
+    log(`  ✓ ${mode === "symlink" ? "symlinked" : "copied"} ${name}`);
+  }
+  if (anyCopied) {
+    log(`  ! some skills were copied instead of symlinked (no symlink permission).`);
+    log(`     Re-run 'peerd init' after editing skills/ to refresh the copies,`);
+    log(`     or enable Windows Developer Mode (Settings → For Developers) to get symlinks.`);
   }
 
   // ── 7. Shell aliases ───────────────────────────────────────────
@@ -214,64 +224,23 @@ export async function cmdInit(args: string[]): Promise<number> {
   log("step 6/7: shell aliases (claude + peerd)…");
   if (opts.noAlias) {
     log(`  - skipped (--no-alias)`);
+  } else if (IS_WIN) {
+    installPowerShellAliases(REPO_ROOT, log);
   } else {
-    const peerdCliEntry = path.join(REPO_ROOT, "peerd-cli", "dist", "index.js");
-    const claudeAlias = `alias claude='claude --dangerously-load-development-channels server:peerd'`;
-    const peerdAlias = `alias peerd='node ${JSON.stringify(peerdCliEntry)}'`;
-    const block = [
-      "",
-      "# peerd aliases — added by 'peerd init'",
-      claudeAlias,
-      peerdAlias,
-      "",
-    ].join("\n");
-    const rcCandidates = [
-      path.join(HOME, ".zshrc"),
-      path.join(HOME, ".bashrc"),
-      path.join(HOME, ".bash_profile"),
-    ];
-    let added = false;
-    for (const rc of rcCandidates) {
-      if (!fs.existsSync(rc)) continue;
-      const cur = fs.readFileSync(rc, "utf8");
-      const hasClaudeAlias = cur.includes(claudeAlias);
-      const hasPeerdAlias = cur.includes(peerdAlias);
-
-      if (hasClaudeAlias && hasPeerdAlias) {
-        log(`  ✓ both aliases already present in ${rc}`);
-        added = true;
-        continue;
-      }
-      // If the older single-alias block is there, just append the missing peerd alias
-      // after it; otherwise add the full block.
-      if (hasClaudeAlias && !hasPeerdAlias) {
-        fs.appendFileSync(rc, `\n${peerdAlias}\n`);
-        log(`  + appended peerd alias to ${rc} (claude alias already there)`);
-      } else if (!hasClaudeAlias && hasPeerdAlias) {
-        fs.appendFileSync(rc, `\n${claudeAlias}\n`);
-        log(`  + appended claude alias to ${rc} (peerd alias already there)`);
-      } else {
-        fs.appendFileSync(rc, block);
-        log(`  + appended claude + peerd aliases to ${rc}`);
-      }
-      added = true;
-    }
-    if (!added) {
-      log(`  ! no shell rc found; add these lines manually:`);
-      log(`      ${claudeAlias}`);
-      log(`      ${peerdAlias}`);
-    }
+    installPosixAliases(REPO_ROOT, log);
   }
 
-  // ── 8. Autostart (macOS LaunchAgent OR Linux systemd user unit) ─
+  // ── 8. Autostart (macOS LaunchAgent / Linux systemd user / Windows startup) ─
   log("");
   log("step 7/7: autostart…");
   if (!opts.autostart) {
     log(`  - skipped (pass --autostart to keep peerd running across reboots)`);
-  } else if (process.platform === "darwin") {
+  } else if (IS_MAC) {
     installLaunchAgentMac(STATE_DIR, log);
-  } else if (process.platform === "linux") {
+  } else if (IS_LINUX) {
     installSystemdUnitLinux(STATE_DIR, log);
+  } else if (IS_WIN) {
+    installStartupShortcutWindows(STATE_DIR, log);
   } else {
     log(`  - --autostart not supported on ${process.platform}; skipped`);
   }
@@ -292,13 +261,18 @@ export async function cmdInit(args: string[]): Promise<number> {
     log(`  cd ${JSON.stringify(REPO_ROOT)} && npm run peerd`);
     log("");
     log("Or re-run init with --autostart to install an auto-restart service:");
-    log(`  ${process.platform === "linux" ? "(systemd user unit)" : process.platform === "darwin" ? "(macOS LaunchAgent)" : "(supported on macOS + Linux)"}`);
+    log(`  ${IS_LINUX ? "(systemd user unit)" : IS_MAC ? "(macOS LaunchAgent)" : IS_WIN ? "(Windows Startup-folder shortcut)" : "(supported on macOS, Linux, Windows)"}`);
     log("");
   }
   log("To pair with a teammate (do this with them ONCE per teammate):");
   log("  1. On your machine:        peerd ready");
   log(`     (Or have them run: peerd pair ${myHost}  on their side, once you're ready.)`);
   log("  2. On their machine:       peerd pair <your-hostname>");
+  if (IS_WIN || /\.local$/.test(myHost)) {
+    log("");
+    log("  Cross-OS tip: if a teammate is on Windows, prefer Tailscale MagicDNS");
+    log("  hostnames over <host>.local — Bonjour is often missing on Windows.");
+  }
   log("");
   log("Then in any new terminal:");
   log("  claude                  # alias auto-loads peerd channel");
@@ -441,4 +415,155 @@ WantedBy=default.target
   // We don't run this — it needs sudo. Just tell the user.
   log(`  ! to keep peerd running even when you're logged out, run once:`);
   log(`     sudo loginctl enable-linger $USER`);
+}
+
+function installPosixAliases(repoRoot: string, log: (...a: unknown[]) => void): void {
+  const peerdCliEntry = path.join(repoRoot, "peerd-cli", "dist", "index.js");
+  const claudeAlias = `alias claude='claude --dangerously-load-development-channels server:peerd'`;
+  const peerdAlias = `alias peerd='node ${JSON.stringify(peerdCliEntry)}'`;
+  const block = [
+    "",
+    "# peerd aliases — added by 'peerd init'",
+    claudeAlias,
+    peerdAlias,
+    "",
+  ].join("\n");
+  const rcCandidates = [
+    path.join(HOME, ".zshrc"),
+    path.join(HOME, ".bashrc"),
+    path.join(HOME, ".bash_profile"),
+  ];
+  let added = false;
+  for (const rc of rcCandidates) {
+    if (!fs.existsSync(rc)) continue;
+    const cur = fs.readFileSync(rc, "utf8");
+    const hasClaudeAlias = cur.includes(claudeAlias);
+    const hasPeerdAlias = cur.includes(peerdAlias);
+
+    if (hasClaudeAlias && hasPeerdAlias) {
+      log(`  ✓ both aliases already present in ${rc}`);
+      added = true;
+      continue;
+    }
+    if (hasClaudeAlias && !hasPeerdAlias) {
+      fs.appendFileSync(rc, `\n${peerdAlias}\n`);
+      log(`  + appended peerd alias to ${rc} (claude alias already there)`);
+    } else if (!hasClaudeAlias && hasPeerdAlias) {
+      fs.appendFileSync(rc, `\n${claudeAlias}\n`);
+      log(`  + appended claude alias to ${rc} (peerd alias already there)`);
+    } else {
+      fs.appendFileSync(rc, block);
+      log(`  + appended claude + peerd aliases to ${rc}`);
+    }
+    added = true;
+  }
+  if (!added) {
+    log(`  ! no shell rc found; add these lines manually:`);
+    log(`      ${claudeAlias}`);
+    log(`      ${peerdAlias}`);
+  }
+}
+
+function installPowerShellAliases(repoRoot: string, log: (...a: unknown[]) => void): void {
+  const peerdCliEntry = path.join(repoRoot, "peerd-cli", "dist", "index.js");
+  // PowerShell `Set-Alias` can't pass arguments → we define `function`s.
+  // IMPORTANT: `& claude ...` inside `function claude {}` would recurse —
+  // PowerShell resolves bare names to the function first. So we use
+  // Get-Command with -CommandType Application to find the underlying binary
+  // at call time (late binding, survives Tailscale/claude reinstalls).
+  // The MARKER comment lets us upgrade the block on re-init without dupes.
+  const MARKER = "# peerd aliases — added by 'peerd init'";
+  const END_MARKER = "# end peerd aliases";
+  const lines = [
+    MARKER,
+    `function claude {`,
+    `  $cmd = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1`,
+    `  if (-not $cmd) { Write-Error 'peerd: claude CLI not found on PATH'; return }`,
+    `  & $cmd.Source --dangerously-load-development-channels server:peerd @args`,
+    `}`,
+    `function peerd { & node ${quoteForPowerShell(peerdCliEntry)} @args }`,
+    END_MARKER,
+  ];
+  const block = lines.join("\r\n");
+
+  // PowerShell 7+ uses ~\Documents\PowerShell\... ; Windows PowerShell 5.1
+  // uses ~\Documents\WindowsPowerShell\... . Write both so the user's
+  // claude/peerd functions work in either shell.
+  const candidates = [
+    path.join(HOME, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1"),
+    path.join(HOME, "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1"),
+  ];
+  let any = false;
+  for (const profile of candidates) {
+    try {
+      fs.mkdirSync(path.dirname(profile), { recursive: true });
+      const cur = fs.existsSync(profile) ? fs.readFileSync(profile, "utf8") : "";
+      if (cur.includes(MARKER) && cur.includes(END_MARKER)) {
+        // Replace the existing peerd block (MARKER…END_MARKER) so re-running
+        // init upgrades the embedded paths.
+        const re = new RegExp(`${escapeRe(MARKER)}[\\s\\S]*?${escapeRe(END_MARKER)}`);
+        const upgraded = cur.replace(re, block);
+        if (upgraded !== cur) {
+          fs.writeFileSync(profile, upgraded);
+          log(`  ✓ refreshed peerd block in ${profile}`);
+        } else {
+          log(`  ✓ peerd block already current in ${profile}`);
+        }
+      } else {
+        const prefix = cur.length === 0 || cur.endsWith("\n") ? cur : cur + "\r\n";
+        fs.writeFileSync(profile, prefix + (prefix === "" ? "" : "\r\n") + block + "\r\n");
+        log(`  + appended claude + peerd functions to ${profile}`);
+      }
+      any = true;
+    } catch (e: any) {
+      log(`  ! could not write ${profile}: ${e?.message ?? e}`);
+    }
+  }
+  if (!any) {
+    log(`  ! couldn't write any PowerShell profile. Paste these into $PROFILE manually:`);
+    for (const l of lines) log(`      ${l}`);
+  } else {
+    log(`  ! if PowerShell blocks the profile on first launch, allow it once with:`);
+    log(`      Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`);
+  }
+}
+
+function quoteForPowerShell(s: string): string {
+  // Single-quoted PS strings only need '' escaping for embedded single quotes.
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function installStartupShortcutWindows(stateDir: string, log: (...a: unknown[]) => void): void {
+  const peerdEntry = path.join(REPO_ROOT, "peerd", "dist", "index.js");
+  if (!fs.existsSync(peerdEntry)) {
+    log(`  ! peerd built? expected ${peerdEntry}. Skipping autostart.`);
+    return;
+  }
+  // Drop a .cmd into the user's Startup folder. Windows runs everything in
+  // that folder at logon. This is simpler and more reliable than a .lnk
+  // (which would need PowerShell + COM to author) and doesn't require a
+  // separate service framework like node-windows.
+  const startupDir = path.join(
+    process.env.APPDATA ?? path.join(HOME, "AppData", "Roaming"),
+    "Microsoft", "Windows", "Start Menu", "Programs", "Startup",
+  );
+  fs.mkdirSync(startupDir, { recursive: true });
+  const cmdPath = path.join(startupDir, "peerd.cmd");
+  const logPath = path.join(stateDir, "peerd.log");
+  const errPath = path.join(stateDir, "peerd.err.log");
+  // `start "" /b` so the launcher window detaches and closes immediately;
+  // stdout/stderr go to log files for diagnostics.
+  const cmd =
+    `@echo off\r\n` +
+    `REM Auto-generated by 'peerd init'. Edit at your own risk.\r\n` +
+    `start "peerd" /b "${process.execPath}" "${peerdEntry}" 1>>"${logPath}" 2>>"${errPath}"\r\n`;
+  fs.writeFileSync(cmdPath, cmd);
+  log(`  ✓ wrote ${cmdPath}`);
+  log(`     (peerd will auto-start at logon; logs at ${logPath})`);
+  log(`  ! Windows Startup runs once per logon — there is no auto-restart on crash.`);
+  log(`     If you want supervision, install node-windows or run peerd under nssm.`);
 }
