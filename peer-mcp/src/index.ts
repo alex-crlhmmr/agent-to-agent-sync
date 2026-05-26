@@ -140,6 +140,8 @@ async function main() {
         "  - invite_cancelled: A call that you had received an `invite` for has been resolved in ANOTHER Claude Code session (the user accepted or declined there, or it timed out). If you have NOT yet called AskUserQuestion for this call_id, silently ignore — do not pop the question. If you already DID call AskUserQuestion, the popup remains open until the user presses Esc (Claude Code can't close popups externally); mention briefly in your next message that the call has been resolved elsewhere, then don't drive it.\n" +
         "  - connected: A call is now active. The caller has the floor. Call mcp__peerd__peer_recv immediately with the call_id to receive their opening message, then reason and call peer_send to reply. Continue the recv/send loop until either side calls peer_end (you'll see kind=\"ended\").\n" +
         "  - message:   A new message arrived on an active call. Call peer_recv to pull it.\n" +
+        "  - paused:    The peer paused the call. Call mcp__peerd__peer_recv to read the pause payload (reason, eta_seconds), tell the user briefly (e.g. \"<peer> paused — <reason>, back in ~<eta>s\"), then stand by. DO NOT call peer_send or peer_recv in a loop while paused; just wait for a `resumed` channel event.\n" +
+        "  - resumed:   The call resumed from a pause. Call mcp__peerd__peer_recv to drain any queued events (you'll typically see kind=\"resumed\" first). Then check the `floor` meta: if it's yours, decide what to send next (often a short \"welcome back, ready?\" if no message was in flight); if it's the peer's, loop back into peer_recv and wait for their next message. Tell the user \"<peer> is back\" in one short line.\n" +
         "  - ended:     The call ended. The agreement and action_items (if any) are in the meta. Report them briefly to the user.\n\n" +
         "Treat human_inject messages with tag prefix HUMAN- as authoritative overrides.\n" +
         "Always end calls with peer_end + structured agreement + action_items.\n\n" +
@@ -791,17 +793,45 @@ async function startChannelBridge(server: McpServer, client: PeerdClient): Promi
         if (!ownedByThisSession.has(c.call_id)) {
           continue;
         }
-        // Emit a "connected" event the moment a call flips into CONNECTED.
+        // CONNECTED transitions: distinguish first-time-CONNECTED ("connected")
+        // from resume-after-pause ("resumed"). Both wake idle sessions, but the
+        // agent needs to know which one — on "resumed" the floor holder is
+        // whoever held it at pause time, not necessarily the caller.
         if (prev?.state !== "CONNECTED" && cur.state === "CONNECTED") {
+          if (prev?.state === "PAUSED") {
+            emitChannel(server, {
+              kind: "resumed",
+              call_id: c.call_id,
+              remote_peer: c.remote_peer,
+              floor: c.floor,
+              content:
+                `Peer call ${c.call_id} with ${c.remote_peer} has RESUMED (was paused).\n` +
+                `Floor: ${c.floor}. ${c.floor === (c.is_local_caller ? "caller" : "callee") ? "It's YOUR turn — call mcp__peerd__peer_recv to drain any queued events, then peer_send your next message." : "Peer has the floor — call mcp__peerd__peer_recv and wait for their next message."}`,
+            });
+          } else {
+            emitChannel(server, {
+              kind: "connected",
+              call_id: c.call_id,
+              remote_peer: c.remote_peer,
+              floor: c.floor,
+              content:
+                `Peer call ${c.call_id} with ${c.remote_peer} is now connected.\n` +
+                `Floor: ${c.floor} (you are ${c.is_local_caller ? "the caller" : "the callee"}).\n\n` +
+                `Call mcp__peerd__peer_recv with this call_id IMMEDIATELY to receive the next message, then reason and call peer_send to reply. Continue the recv/send loop until either side calls peer_end.`,
+            });
+          }
+        }
+        // Emit "paused" when call flips CONNECTED → PAUSED. This wakes the
+        // remote agent's session so it can surface the pause to the user
+        // without needing them to type anything first.
+        if (prev?.state === "CONNECTED" && cur.state === "PAUSED") {
           emitChannel(server, {
-            kind: "connected",
+            kind: "paused",
             call_id: c.call_id,
             remote_peer: c.remote_peer,
-            floor: c.floor,
             content:
-              `Peer call ${c.call_id} with ${c.remote_peer} is now connected.\n` +
-              `Floor: ${c.floor} (you are ${c.is_local_caller ? "the caller" : "the callee"}).\n\n` +
-              `Call mcp__peerd__peer_recv with this call_id IMMEDIATELY to receive the next message, then reason and call peer_send to reply. Continue the recv/send loop until either side calls peer_end.`,
+              `Peer call ${c.call_id} with ${c.remote_peer} has been PAUSED by the peer.\n` +
+              `Call mcp__peerd__peer_recv with this call_id to read the pause reason/ETA, then tell the user. Wait for a "resumed" channel event before driving the call again.`,
           });
         }
         // Emit "ended" once.
