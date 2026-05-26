@@ -164,6 +164,44 @@ async function main() {
     return { content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] };
   }
 
+  /**
+   * Shared resolver for peer_share_file / peer_share_file_ref:
+   *   - If local_path is given, read the file from disk on this machine.
+   *   - Otherwise use the supplied content string.
+   *   - Exactly one must be supplied.
+   *   - `path` (logical label) defaults to basename(local_path) when local_path is used.
+   */
+  async function resolveShareContent(input: {
+    local_path?: string;
+    content?: string;
+    path?: string;
+  }): Promise<{ content: string; path: string }> {
+    const hasLocal = !!input.local_path;
+    const hasInline = input.content !== undefined && input.content !== null;
+    if (hasLocal && hasInline) {
+      throw new Error("Pass either local_path OR content, not both.");
+    }
+    if (!hasLocal && !hasInline) {
+      throw new Error("Must pass either local_path (preferred for real files) or content.");
+    }
+    if (hasLocal) {
+      const abs = path.isAbsolute(input.local_path!) ? input.local_path! : path.resolve(process.cwd(), input.local_path!);
+      let content: string;
+      try {
+        content = await fs.promises.readFile(abs, "utf8");
+      } catch (e: any) {
+        if (e?.code === "ENOENT") throw new Error(`No such file: ${abs}`);
+        if (e?.code === "EISDIR") throw new Error(`${abs} is a directory; peer_share_file is for single files.`);
+        if (e?.code === "EACCES") throw new Error(`Permission denied: ${abs}`);
+        throw new Error(`Failed to read ${abs}: ${e?.message ?? e}`);
+      }
+      const logicalPath = input.path ?? path.basename(abs);
+      return { content, path: logicalPath };
+    }
+    if (!input.path) throw new Error("`path` is required when supplying `content` directly.");
+    return { content: input.content!, path: input.path };
+  }
+
   // ── peer_invite ────────────────────────────────────────────────
   server.registerTool(
     "peer_invite",
@@ -396,23 +434,25 @@ async function main() {
   server.registerTool(
     "peer_share_file",
     {
-      description: "Send a file inline to the peer mid-call. Use when there's a CONCRETE file/snippet to share (a type definition, a config, a small helper) — much better than pasting into peer_send because the receiver gets the path + language + hash as structured metadata. Hard cap: 256 KiB of content. The receiver's agent will see this as a structured file event in their context and decide what to do with it (often: read + reference in the conversation, or apply via Edit if you also proposed a change). Same floor-rules as peer_send: must be your turn; after sending, the peer has the floor (you must peer_recv next).",
+      description: "Send a file inline to the peer mid-call (≤256 KiB). Two ways to supply the content:\n  • local_path (PREFERRED for any non-trivial file): peer-mcp reads the file from disk so you don't have to retype it in your tool call. Use this whenever you have a real file on the user's machine. Absolute or relative-to-cwd paths both work.\n  • content (legacy / inline): you supply the full text as a string. Only practical for tiny snippets (<~25 KB) due to LLM output budget.\nExactly one of {local_path, content} required. `path` (the logical label the peer sees) defaults to local_path's basename. Same floor-rules as peer_send.",
       inputSchema: {
         call_id: z.string(),
-        path: z.string().describe("Logical path of the file (e.g., \"schemas/user.ts\"). Need not exist on receiver — they see it as the source-of-truth label."),
-        content: z.string().describe("Full file content. Max 256 KiB UTF-8."),
-        language: z.string().optional().describe("Optional language hint (e.g., \"typescript\", \"go\")."),
-        reason: z.string().optional().describe("1-sentence why you're sharing this — gives the peer agent context for what to do with it."),
+        local_path: z.string().optional().describe("Absolute or cwd-relative path to a file ON THIS MACHINE. peer-mcp reads it server-side; you do NOT need to type its content. Use this for any real file."),
+        content: z.string().optional().describe("Alternative to local_path: the raw file content as a string. Only practical for tiny snippets — use local_path for actual files."),
+        path: z.string().optional().describe("Logical path label the peer sees (e.g. \"schemas/user.ts\"). Defaults to basename(local_path). Required if you supply `content` instead."),
+        language: z.string().optional().describe("Optional language hint (e.g. \"typescript\", \"go\")."),
+        reason: z.string().optional().describe("1-sentence why you're sharing this."),
       },
     },
-    async ({ call_id, path: filePath, content, language, reason }) => {
+    async (input) => {
       try {
+        const resolved = await resolveShareContent(input);
         const res = await client.call("share_file", {
-          call_id,
-          path: filePath,
-          content,
-          language,
-          reason,
+          call_id: input.call_id,
+          path: resolved.path,
+          content: resolved.content,
+          language: input.language,
+          reason: input.reason,
         });
         return asTextResult(res);
       } catch (e: any) {
@@ -452,19 +492,28 @@ async function main() {
   server.registerTool(
     "peer_share_file_ref",
     {
-      description: "Share a LARGER file (up to 10 MiB) by reference. Full content stays on YOUR side; the peer's agent sees only metadata + a small preview, and can pull the body on demand via peer_fetch. Use when content exceeds 256 KiB (otherwise prefer peer_share_file inline) — whole modules, big configs, generated schemas. Same floor-rules as peer_send. Caller's peerd stores the content in memory until the call ends.",
+      description: "Share a LARGER file (up to 10 MiB) by reference. Full content stays on YOUR side; peer's agent sees only metadata + small preview. Peer pulls the body on demand via peer_fetch. STRONGLY PREFER local_path for any real file — supplying `content` as a string is impractical above ~25 KB (LLM output budget). Exactly one of {local_path, content} required. Same floor-rules as peer_send.",
       inputSchema: {
         call_id: z.string(),
-        path: z.string().describe("Logical path label (e.g., \"src/big/module.ts\")."),
-        content: z.string().describe("Full file content (≤10 MiB UTF-8)."),
+        local_path: z.string().optional().describe("Absolute or cwd-relative path on THIS machine. peer-mcp reads the file server-side. STRONGLY preferred for files >25 KB."),
+        content: z.string().optional().describe("Alternative: raw content as a string. Only practical for small files. Use local_path otherwise."),
+        path: z.string().optional().describe("Logical path label the peer sees. Defaults to basename(local_path). Required if you use `content`."),
         reason: z.string().optional().describe("1-sentence why you're sharing."),
         language: z.string().optional(),
-        preview_chars: z.number().int().min(0).max(1024).optional().describe("How many chars of content to include as preview (default 200, max 1024). Preview helps the peer agent decide whether to fetch the full body."),
+        preview_chars: z.number().int().min(0).max(1024).optional().describe("Chars of content to include as preview (default 200, max 1024)."),
       },
     },
     async (input) => {
       try {
-        const res = await client.call("share_file_ref", input, { timeoutMs: 30_000 });
+        const resolved = await resolveShareContent(input);
+        const res = await client.call("share_file_ref", {
+          call_id: input.call_id,
+          path: resolved.path,
+          content: resolved.content,
+          reason: input.reason,
+          language: input.language,
+          preview_chars: input.preview_chars,
+        }, { timeoutMs: 30_000 });
         return asTextResult(res);
       } catch (e: any) {
         return asTextResult({ error: e?.code ?? "ERROR", message: e?.message ?? String(e) });
