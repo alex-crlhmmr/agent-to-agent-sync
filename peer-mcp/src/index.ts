@@ -145,7 +145,7 @@ async function main() {
         "Always end calls with peer_end + structured agreement + action_items.\n\n" +
         "IN-CALL TOOLS BEYOND peer_send:\n" +
         "  - mcp__peerd__peer_share_file(call_id, path, content, language?, reason?) — share a SMALL file inline (≤256 KiB). Floor-locked.\n" +
-        "  - mcp__peerd__peer_share_file_ref(call_id, path, content, …) — share a LARGER file (≤10 MiB) by reference; the peer pulls the body via peer_fetch only if needed. Floor-locked.\n" +
+        "  - mcp__peerd__peer_share_file_ref(call_id, path, content, …) — share a LARGER file (≤32 MiB) by reference; the peer pulls the body via peer_fetch only if needed. Floor-locked.\n" +
         "  - mcp__peerd__peer_fetch(call_id, ref) — pull the body of a file_ref_shared. NOT floor-locked (works anytime). Use when the preview wasn't enough.\n" +
         "  - mcp__peerd__peer_propose_change(call_id, target_file, diff, rationale, requires_human_approval=true) — propose a specific change for the PEER to apply. Floor-locked.\n" +
         "  - mcp__peerd__peer_pause(call_id, reason?, eta_seconds?) and mcp__peerd__peer_resume(call_id) — pause when the user needs to run tests / read code; resume when they're back. NOT floor-locked; either side any time.\n" +
@@ -492,7 +492,7 @@ async function main() {
   server.registerTool(
     "peer_share_file_ref",
     {
-      description: "Share a LARGER file (up to 10 MiB) by reference. Full content stays on YOUR side; peer's agent sees only metadata + small preview. Peer pulls the body on demand via peer_fetch. STRONGLY PREFER local_path for any real file — supplying `content` as a string is impractical above ~25 KB (LLM output budget). Exactly one of {local_path, content} required. Same floor-rules as peer_send.",
+      description: "Share a LARGER file (up to 32 MiB) by reference. Full content stays on YOUR side; peer's agent sees only metadata + small preview. Peer pulls the body on demand via peer_fetch. STRONGLY PREFER local_path for any real file — supplying `content` as a string is impractical above ~25 KB (LLM output budget). Exactly one of {local_path, content} required. Same floor-rules as peer_send.",
       inputSchema: {
         call_id: z.string(),
         local_path: z.string().optional().describe("Absolute or cwd-relative path on THIS machine. peer-mcp reads the file server-side. STRONGLY preferred for files >25 KB."),

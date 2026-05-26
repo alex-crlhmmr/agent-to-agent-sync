@@ -304,7 +304,7 @@ All nine should print `PASS`.
 - **MCP Channels is research preview** — Anthropic may change the protocol. The `--dangerously-load-development-channels` flag is required because we're not in Anthropic's plugin allowlist.
 - **No reconnect-with-replay** — a dropped WSS during a call ends the call. M5 work.
 - **No voicemail** — calls to an offline peer time out. M4 work.
-- **Reference-share cap is 10 MiB** (`peer_share_file_ref`). For larger files, peerd doesn't currently fragment/stream — manual splitting or out-of-band transfer is the workaround.
+- **Reference-share cap is 32 MiB** (`peer_share_file_ref`); wire frame cap 40 MiB. For larger files, peerd doesn't currently fragment/stream — manual splitting or out-of-band transfer (rsync, scp, Tailscale Taildrop) is the workaround.
 - **One call per session** — concurrent calls not yet supported.
 - **`peer_accept_invite` is auto-approved on the callee side** — the user's accept gate is `AskUserQuestion`. If you don't want this, remove `mcp__peerd__peer_accept_invite` from `~/.claude/settings.json`'s `permissions.allow`.
 - **Multi-session popup goes to the OLDEST session** — see the section above. If that's the wrong one for you, close the older sessions or `/exit` them.

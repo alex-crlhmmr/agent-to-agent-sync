@@ -95,8 +95,8 @@ export interface ProposeChangePayload {
 /** Hard cap on inline file content (per PROTOCOL.md §5.5.2). */
 export const SHARE_FILE_MAX_BYTES = 256 * 1024;
 
-/** Hard cap on share_file_ref content (10 MiB). Bigger needs real streaming. */
-export const SHARE_FILE_REF_MAX_BYTES = 10 * 1024 * 1024;
+/** Hard cap on share_file_ref content (32 MiB). Bigger needs chunked transfer. */
+export const SHARE_FILE_REF_MAX_BYTES = 32 * 1024 * 1024;
 
 /** Reference-share: full content stays on sender; receiver pulls via FETCH. */
 export interface ShareFileRefPayload {

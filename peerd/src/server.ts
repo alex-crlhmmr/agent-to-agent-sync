@@ -67,7 +67,7 @@ export class PeerServer extends EventEmitter {
     this.wss = new WebSocketServer({
       noServer: true,
       handleProtocols: (protocols: Set<string>) => (protocols.has(SUBPROTOCOL) ? SUBPROTOCOL : false),
-      maxPayload: 16 * 1024 * 1024,
+      maxPayload: 40 * 1024 * 1024,
     });
 
     // ── HTTP request handler for non-WS routes (currently just /pair) ────────
