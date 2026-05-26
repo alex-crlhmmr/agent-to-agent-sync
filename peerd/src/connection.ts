@@ -56,11 +56,15 @@ export class Connection extends EventEmitter {
     this.ws.on("message", (data: Buffer) => this.handleRaw(data.toString("utf8")));
     this.ws.on("close", (code: number, reason: Buffer) => {
       const reasonStr = reason.toString("utf8");
-      console.log(`[wire-close] role=${this.role} peer=${this.peerName || "?"} code=${code} reason=${JSON.stringify(reasonStr)}`);
+      // Always log abnormal closures (code != 1000). Normal closes only in debug.
+      if (process.env.PEERD_DEBUG || (code !== 1000 && code !== 1005)) {
+        console.log(`[wire-close] role=${this.role} peer=${this.peerName || "?"} code=${code} reason=${JSON.stringify(reasonStr)}`);
+      }
       this.cleanup();
       this.emit("close", reasonStr || `code=${code}`);
     });
     this.ws.on("error", (err: Error) => {
+      // Always log errors.
       console.log(`[wire-error] role=${this.role} peer=${this.peerName || "?"}: ${err?.message ?? err}`);
       this.emit("error", err);
     });
@@ -123,7 +127,7 @@ export class Connection extends EventEmitter {
     }
 
     // Diagnostic: log every non-heartbeat frame we receive on the wire.
-    if (env.type !== "PING" && env.type !== "PONG") {
+    if (process.env.PEERD_DEBUG && env.type !== "PING" && env.type !== "PONG") {
       console.log(`[wire-in] role=${this.role} from=${env.from} type=${env.type} call_id=${env.call_id ?? "-"} seq=${env.seq ?? "-"} bytes=${raw.length}`);
     }
 
@@ -210,6 +214,7 @@ export class Connection extends EventEmitter {
 
   private sendRaw<T>(env: Envelope<T>): void {
     if (this.closed) {
+      // Always log dropped sends — it's a real problem, never just noise.
       if (env.type !== "PING" && env.type !== "PONG") {
         console.log(`[wire-out-DROPPED] connection closed; lost frame role=${this.role} type=${env.type} call_id=${env.call_id ?? "-"}`);
       }
@@ -217,11 +222,12 @@ export class Connection extends EventEmitter {
     }
     try {
       const raw = encode(env);
-      if (env.type !== "PING" && env.type !== "PONG") {
+      if (process.env.PEERD_DEBUG && env.type !== "PING" && env.type !== "PONG") {
         console.log(`[wire-out] role=${this.role} to=${this.peerName} type=${env.type} call_id=${env.call_id ?? "-"} seq=${env.seq ?? "-"} bytes=${raw.length}`);
       }
       this.ws.send(raw);
     } catch (e: any) {
+      // Always log send errors.
       console.log(`[wire-out-ERROR] role=${this.role} type=${env.type}: ${e?.message ?? e}`);
       this.emit("error", e);
     }
