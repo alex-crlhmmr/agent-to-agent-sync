@@ -412,6 +412,45 @@ export class ControlServer {
         });
       }
 
+      case "share_file_ref": {
+        const cid = String(params.call_id ?? "");
+        const filePath = String(params.path ?? "");
+        const content = String(params.content ?? "");
+        if (!cid || !filePath) throw rpcError("INVALID_PARAMS", "call_id and path required");
+        return await this.cm.shareFileRef(cid, {
+          path: filePath,
+          content,
+          reason: params.reason as string | undefined,
+          language: params.language as string | undefined,
+          preview_chars: params.preview_chars as number | undefined,
+        });
+      }
+
+      case "fetch_ref": {
+        const cid = String(params.call_id ?? "");
+        const ref = String(params.ref ?? "");
+        if (!cid || !ref) throw rpcError("INVALID_PARAMS", "call_id and ref required");
+        const timeoutMs = params.timeout_s !== undefined
+          ? Math.round(Number(params.timeout_s) * 1000)
+          : 30_000;
+        return await this.cm.fetchRef(cid, ref, timeoutMs);
+      }
+
+      case "pause": {
+        const cid = String(params.call_id ?? "");
+        if (!cid) throw rpcError("INVALID_PARAMS", "call_id required");
+        return await this.cm.pause(cid, {
+          reason: params.reason as string | undefined,
+          eta_seconds: params.eta_seconds as number | undefined,
+        });
+      }
+
+      case "resume_call": {
+        const cid = String(params.call_id ?? "");
+        if (!cid) throw rpcError("INVALID_PARAMS", "call_id required");
+        return await this.cm.resumeCall(cid);
+      }
+
       case "recv": {
         const cid = String(params.call_id ?? "");
         const timeoutS = Number(params.timeout_s ?? 60);

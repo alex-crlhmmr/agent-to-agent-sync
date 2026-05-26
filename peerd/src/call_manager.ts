@@ -7,16 +7,22 @@ import {
   EndPayload,
   Envelope,
   ErrorCode,
+  FetchPayload,
+  FetchResponsePayload,
   HumanInjectPayload,
   InvitePayload,
   InviteResponsePayload,
   ListSessionsPayload,
   ListSessionsResponsePayload,
+  PausePayload,
   ProposeChangePayload,
+  ResumeCallPayload,
   SendPayload,
   SessionInfo,
   ShareFilePayload,
+  ShareFileRefPayload,
   SHARE_FILE_MAX_BYTES,
+  SHARE_FILE_REF_MAX_BYTES,
 } from "./types.js";
 import { callId, nowIso, sessionToken } from "./ids.js";
 import { envelope, errorEnvelope } from "./wire.js";
@@ -67,10 +73,10 @@ export interface InviteEvent {
 
 export interface CallMessageEvent {
   call_id: string;
-  kind: "send" | "end" | "human_inject" | "file_shared" | "change_proposed";
+  kind: "send" | "end" | "human_inject" | "file_shared" | "change_proposed" | "file_ref_shared" | "paused" | "resumed";
   seq: number;
   from: string;
-  payload: SendPayload | EndPayload | HumanInjectPayload | ShareFilePayload | ProposeChangePayload;
+  payload: SendPayload | EndPayload | HumanInjectPayload | ShareFilePayload | ProposeChangePayload | ShareFileRefPayload | PausePayload | ResumeCallPayload;
 }
 
 /** In-flight LIST_SESSIONS request awaiting a response from a peer. */
@@ -78,6 +84,21 @@ interface PendingListSessions {
   resolve: (sessions: SessionInfo[]) => void;
   reject: (err: Error) => void;
   timer: NodeJS.Timeout;
+}
+
+/** In-flight FETCH awaiting a FETCH_RESPONSE. */
+interface PendingFetch {
+  resolve: (resp: { content: string; hash_sha256: string }) => void;
+  reject: (err: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+/** Locally-stored full content for refs WE have offered to peers. */
+interface LocalRef {
+  call_id: string;
+  path: string;
+  content: string;
+  hash_sha256: string;
 }
 
 export class CallManager extends EventEmitter {
@@ -89,6 +110,9 @@ export class CallManager extends EventEmitter {
   private calls: Map<string, CallRecord> = new Map();
   private pending: Map<string, PendingInvite> = new Map();
   private pendingListSessions: Map<string, PendingListSessions> = new Map();
+  private pendingFetches: Map<string, PendingFetch> = new Map();
+  /** ref_id → local content offered to peer. Cleared when call ends. */
+  private localRefs: Map<string, LocalRef> = new Map();
 
   constructor(opts: CallManagerOptions) {
     super();
@@ -309,6 +333,127 @@ export class CallManager extends EventEmitter {
     return { seq: call.seqOut };
   }
 
+  /**
+   * Share a file by reference. The full content stays on the sender side until
+   * the receiver requests it via FETCH. Same turn-lock rules as send().
+   * Hard cap 10 MiB content.
+   */
+  async shareFileRef(call_id: string, opts: { path: string; content: string; reason?: string; language?: string; preview_chars?: number }): Promise<{ seq: number; ref: string; hash_sha256: string }> {
+    const call = this.expectConnectedCall(call_id);
+    const myFloor = call.isLocalCaller ? "caller" : "callee";
+    if (call.floor !== myFloor) throw new Error("OUT_OF_TURN");
+
+    const bytes = Buffer.byteLength(opts.content, "utf8");
+    if (bytes > SHARE_FILE_REF_MAX_BYTES) {
+      throw new Error(`REF_TOO_LARGE: ${bytes} > ${SHARE_FILE_REF_MAX_BYTES} bytes`);
+    }
+    const ref = "ref_" + crypto.randomBytes(8).toString("hex");
+    const hash_sha256 = crypto.createHash("sha256").update(opts.content).digest("hex");
+
+    // Store locally so we can answer the peer's FETCH later.
+    this.localRefs.set(ref, { call_id, path: opts.path, content: opts.content, hash_sha256 });
+
+    // Build a small preview (default 200 chars, capped at 1024).
+    const previewChars = Math.min(Math.max(0, opts.preview_chars ?? 200), 1024);
+    const preview = previewChars > 0 ? opts.content.slice(0, previewChars) : undefined;
+    const totalLines = opts.content.split("\n").length;
+    const previewLines = preview ? `1-${Math.min(preview.split("\n").length, totalLines)}` : undefined;
+
+    const payload: ShareFileRefPayload = {
+      ref,
+      path: opts.path,
+      size_bytes: bytes,
+      hash_sha256,
+      preview,
+      preview_lines: previewLines,
+      reason: opts.reason,
+      language: opts.language,
+    };
+    const env = envelope<ShareFileRefPayload>("SHARE_FILE_REF", this.selfName, payload, {
+      call_id,
+      seq: ++call.seqOut,
+    });
+    await this.appendTranscript(call, "out", env);
+    const conn = this.getConnection(call.remotePeerName);
+    if (!conn) throw new Error(`peer "${call.remotePeerName}" not connected`);
+    conn.send(env);
+    call.floor = call.isLocalCaller ? "callee" : "caller";
+    await this.persistMeta(call);
+    return { seq: call.seqOut, ref, hash_sha256 };
+  }
+
+  /**
+   * Fetch the full content of a previously-shared ref from the peer.
+   * NOT floor-locked — either side can fetch at any time.
+   */
+  async fetchRef(call_id: string, ref: string, timeoutMs: number = 30_000): Promise<{ content: string; hash_sha256: string }> {
+    const call = this.expectActiveCall(call_id);
+    const conn = this.getConnection(call.remotePeerName);
+    if (!conn) throw new Error(`peer "${call.remotePeerName}" not connected`);
+    const request_id = "fr_" + crypto.randomBytes(8).toString("hex");
+
+    const env = envelope<FetchPayload>("FETCH", this.selfName, { request_id, ref }, {
+      call_id,
+      seq: ++call.seqOut,
+    });
+    await this.appendTranscript(call, "out", env);
+
+    return new Promise<{ content: string; hash_sha256: string }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingFetches.delete(request_id);
+        reject(new Error("fetch timeout"));
+      }, timeoutMs);
+      this.pendingFetches.set(request_id, { resolve, reject, timer });
+      try { conn.send(env); } catch (e: any) {
+        clearTimeout(timer);
+        this.pendingFetches.delete(request_id);
+        reject(new Error(e?.message ?? String(e)));
+      }
+    });
+  }
+
+  /**
+   * Pause an active call (informational). NOT floor-locked — either side
+   * may pause at any time. Both sides transition to PAUSED state.
+   */
+  async pause(call_id: string, opts: { reason?: string; eta_seconds?: number } = {}): Promise<{ seq: number }> {
+    const call = this.expectActiveCall(call_id);
+    if (call.state !== "CONNECTED" && call.state !== "PAUSED") {
+      throw new Error(`call ${call_id} cannot be paused (state=${call.state})`);
+    }
+    const payload: PausePayload = { reason: opts.reason, eta_seconds: opts.eta_seconds };
+    const env = envelope<PausePayload>("PAUSE", this.selfName, payload, {
+      call_id,
+      seq: ++call.seqOut,
+    });
+    await this.appendTranscript(call, "out", env);
+    const conn = this.getConnection(call.remotePeerName);
+    if (!conn) throw new Error(`peer "${call.remotePeerName}" not connected`);
+    conn.send(env);
+    call.state = "PAUSED";
+    await this.persistMeta(call);
+    return { seq: call.seqOut };
+  }
+
+  async resumeCall(call_id: string): Promise<{ seq: number }> {
+    const call = this.expectActiveCall(call_id);
+    if (call.state !== "PAUSED" && call.state !== "CONNECTED") {
+      throw new Error(`call ${call_id} cannot be resumed (state=${call.state})`);
+    }
+    const payload: ResumeCallPayload = {};
+    const env = envelope<ResumeCallPayload>("RESUME", this.selfName, payload, {
+      call_id,
+      seq: ++call.seqOut,
+    });
+    await this.appendTranscript(call, "out", env);
+    const conn = this.getConnection(call.remotePeerName);
+    if (!conn) throw new Error(`peer "${call.remotePeerName}" not connected`);
+    conn.send(env);
+    call.state = "CONNECTED";
+    await this.persistMeta(call);
+    return { seq: call.seqOut };
+  }
+
   async humanInject(call_id: string, tag: string, text: string, priority?: "override" | "advisory"): Promise<{ seq: number }> {
     const call = this.expectActiveCall(call_id);
     const env = envelope<HumanInjectPayload>("HUMAN_INJECT", this.selfName, { tag, text, priority }, {
@@ -350,8 +495,16 @@ export class CallManager extends EventEmitter {
     call.state = "CLOSED";
     call.endedAt = nowIso();
     await this.persistMeta(call);
+    this.clearRefsForCall(call_id);
     this.emit("ended", { call_id, by: "local", artifacts });
     return { artifacts };
+  }
+
+  /** Drop any locally-stored refs that belonged to a now-closed call. */
+  private clearRefsForCall(call_id: string): void {
+    for (const [ref, info] of this.localRefs.entries()) {
+      if (info.call_id === call_id) this.localRefs.delete(ref);
+    }
   }
 
   // ──────────────────────────── incoming routing ────────────────────────────
@@ -382,6 +535,31 @@ export class CallManager extends EventEmitter {
       case "PROPOSE_CHANGE":
         if (!cid) return;
         await this.handleIncomingProposeChange(conn, cid, env);
+        return;
+
+      case "SHARE_FILE_REF":
+        if (!cid) return;
+        await this.handleIncomingShareFileRef(conn, cid, env);
+        return;
+
+      case "FETCH":
+        if (!cid) return;
+        await this.handleIncomingFetch(conn, cid, env);
+        return;
+
+      case "FETCH_RESPONSE":
+        if (!cid) return;
+        await this.handleIncomingFetchResponse(env);
+        return;
+
+      case "PAUSE":
+        if (!cid) return;
+        await this.handleIncomingPause(cid, env);
+        return;
+
+      case "RESUME":
+        if (!cid) return;
+        await this.handleIncomingResume(cid, env);
         return;
 
       case "HUMAN_INJECT":
@@ -655,6 +833,98 @@ export class CallManager extends EventEmitter {
     this.emit("message", evt);
   }
 
+  private async handleIncomingShareFileRef(conn: Connection, cid: string, env: Envelope): Promise<void> {
+    const call = this.calls.get(cid);
+    if (!call || call.state !== "CONNECTED") {
+      conn.send(errorEnvelope(this.selfName, ErrorCode.UNKNOWN_CALL, "no such connected call", { call_id: cid }));
+      return;
+    }
+    const senderRole = env.from === call.caller ? "caller" : "callee";
+    if (call.floor !== senderRole) {
+      conn.send(errorEnvelope(this.selfName, ErrorCode.OUT_OF_TURN, "floor mismatch", { call_id: cid, in_response_to_seq: env.seq }));
+      return;
+    }
+    await this.appendTranscript(call, "in", env);
+    call.floor = senderRole === "caller" ? "callee" : "caller";
+    call.seqIn = env.seq ?? call.seqIn;
+    await this.persistMeta(call);
+    const evt: CallMessageEvent = {
+      call_id: cid,
+      kind: "file_ref_shared",
+      seq: env.seq ?? 0,
+      from: env.from,
+      payload: env.payload as ShareFileRefPayload,
+    };
+    this.emit("message", evt);
+  }
+
+  /** Peer is requesting the body of a ref we offered. NOT floor-locked. */
+  private async handleIncomingFetch(conn: Connection, cid: string, env: Envelope): Promise<void> {
+    const call = this.calls.get(cid);
+    if (!call) {
+      conn.send(errorEnvelope(this.selfName, ErrorCode.UNKNOWN_CALL, "no such call", { call_id: cid }));
+      return;
+    }
+    const p = env.payload as FetchPayload;
+    await this.appendTranscript(call, "in", env);
+    const local = this.localRefs.get(p.ref);
+    const respPayload: FetchResponsePayload = local && local.call_id === cid
+      ? { request_id: p.request_id, ref: p.ref, ok: true, content: local.content, hash_sha256: local.hash_sha256 }
+      : { request_id: p.request_id, ref: p.ref, ok: false, reason: ErrorCode.REF_UNAVAILABLE };
+    const respEnv = envelope<FetchResponsePayload>("FETCH_RESPONSE", this.selfName, respPayload, {
+      call_id: cid,
+      seq: ++call.seqOut,
+    });
+    await this.appendTranscript(call, "out", respEnv);
+    try { conn.send(respEnv); } catch { /* socket gone */ }
+  }
+
+  private async handleIncomingFetchResponse(env: Envelope): Promise<void> {
+    const p = env.payload as FetchResponsePayload;
+    const pending = this.pendingFetches.get(p.request_id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingFetches.delete(p.request_id);
+    if (p.ok && p.content !== undefined && p.hash_sha256) {
+      pending.resolve({ content: p.content, hash_sha256: p.hash_sha256 });
+    } else {
+      pending.reject(new Error(p.reason ?? "REF_UNAVAILABLE"));
+    }
+  }
+
+  /** PAUSE / RESUME are NOT floor-locked — either side any time. */
+  private async handleIncomingPause(cid: string, env: Envelope): Promise<void> {
+    const call = this.calls.get(cid);
+    if (!call) return;
+    await this.appendTranscript(call, "in", env);
+    call.state = "PAUSED";
+    await this.persistMeta(call);
+    const evt: CallMessageEvent = {
+      call_id: cid,
+      kind: "paused",
+      seq: env.seq ?? 0,
+      from: env.from,
+      payload: env.payload as PausePayload,
+    };
+    this.emit("message", evt);
+  }
+
+  private async handleIncomingResume(cid: string, env: Envelope): Promise<void> {
+    const call = this.calls.get(cid);
+    if (!call) return;
+    await this.appendTranscript(call, "in", env);
+    call.state = "CONNECTED";
+    await this.persistMeta(call);
+    const evt: CallMessageEvent = {
+      call_id: cid,
+      kind: "resumed",
+      seq: env.seq ?? 0,
+      from: env.from,
+      payload: env.payload as ResumeCallPayload,
+    };
+    this.emit("message", evt);
+  }
+
   private async handleIncomingHumanInject(cid: string, env: Envelope): Promise<void> {
     const call = this.calls.get(cid);
     if (!call) return;
@@ -676,6 +946,7 @@ export class CallManager extends EventEmitter {
     call.state = "CLOSED";
     call.endedAt = nowIso();
     await this.persistMeta(call);
+    this.clearRefsForCall(cid);
     const p = env.payload as EndPayload;
     this.emit("ended", { call_id: cid, by: "remote", payload: p });
   }

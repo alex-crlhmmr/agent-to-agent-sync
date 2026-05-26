@@ -13,7 +13,12 @@ export type MessageType =
   | "INVITE_RESPONSE"
   | "SEND"
   | "SHARE_FILE"
+  | "SHARE_FILE_REF"
+  | "FETCH"
+  | "FETCH_RESPONSE"
   | "PROPOSE_CHANGE"
+  | "PAUSE"
+  | "RESUME"
   | "END"
   | "HUMAN_INJECT"
   | "ERROR"
@@ -89,6 +94,49 @@ export interface ProposeChangePayload {
 
 /** Hard cap on inline file content (per PROTOCOL.md §5.5.2). */
 export const SHARE_FILE_MAX_BYTES = 256 * 1024;
+
+/** Hard cap on share_file_ref content (10 MiB). Bigger needs real streaming. */
+export const SHARE_FILE_REF_MAX_BYTES = 10 * 1024 * 1024;
+
+/** Reference-share: full content stays on sender; receiver pulls via FETCH. */
+export interface ShareFileRefPayload {
+  ref: string;
+  path: string;
+  size_bytes: number;
+  hash_sha256: string;
+  preview?: string;
+  preview_lines?: string;
+  reason?: string;
+  language?: string;
+}
+
+export interface FetchPayload {
+  request_id: string;
+  ref: string;
+}
+
+export interface FetchResponsePayload {
+  request_id: string;
+  ref: string;
+  ok: boolean;
+  /** Present iff ok=true. */
+  content?: string;
+  hash_sha256?: string;
+  /** Present iff ok=false. */
+  reason?: string;
+}
+
+export interface PausePayload {
+  reason?: string;
+  eta_seconds?: number;
+}
+
+/** Note: distinct from the connection-level RESUME (reconnect-with-replay).
+ *  This is the in-call pause/resume mechanic. */
+export interface ResumeCallPayload {
+  /** Empty placeholder for future expansion. */
+  noop?: never;
+}
 
 export interface EndPayload {
   reason:
