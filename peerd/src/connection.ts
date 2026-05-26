@@ -55,10 +55,13 @@ export class Connection extends EventEmitter {
 
     this.ws.on("message", (data: Buffer) => this.handleRaw(data.toString("utf8")));
     this.ws.on("close", (code: number, reason: Buffer) => {
+      const reasonStr = reason.toString("utf8");
+      console.log(`[wire-close] role=${this.role} peer=${this.peerName || "?"} code=${code} reason=${JSON.stringify(reasonStr)}`);
       this.cleanup();
-      this.emit("close", reason.toString("utf8") || `code=${code}`);
+      this.emit("close", reasonStr || `code=${code}`);
     });
     this.ws.on("error", (err: Error) => {
+      console.log(`[wire-error] role=${this.role} peer=${this.peerName || "?"}: ${err?.message ?? err}`);
       this.emit("error", err);
     });
 
@@ -117,6 +120,11 @@ export class Connection extends EventEmitter {
     if (this.expectedPeerName && env.from !== this.expectedPeerName && env.type !== "HELLO") {
       this.fatal(ErrorCode.UNKNOWN_PEER, `expected from=${this.expectedPeerName} got ${env.from}`);
       return;
+    }
+
+    // Diagnostic: log every non-heartbeat frame we receive on the wire.
+    if (env.type !== "PING" && env.type !== "PONG") {
+      console.log(`[wire-in] role=${this.role} from=${env.from} type=${env.type} call_id=${env.call_id ?? "-"} seq=${env.seq ?? "-"} bytes=${raw.length}`);
     }
 
     switch (env.type) {
@@ -201,10 +209,20 @@ export class Connection extends EventEmitter {
   }
 
   private sendRaw<T>(env: Envelope<T>): void {
-    if (this.closed) return;
+    if (this.closed) {
+      if (env.type !== "PING" && env.type !== "PONG") {
+        console.log(`[wire-out-DROPPED] connection closed; lost frame role=${this.role} type=${env.type} call_id=${env.call_id ?? "-"}`);
+      }
+      return;
+    }
     try {
-      this.ws.send(encode(env));
-    } catch (e) {
+      const raw = encode(env);
+      if (env.type !== "PING" && env.type !== "PONG") {
+        console.log(`[wire-out] role=${this.role} to=${this.peerName} type=${env.type} call_id=${env.call_id ?? "-"} seq=${env.seq ?? "-"} bytes=${raw.length}`);
+      }
+      this.ws.send(raw);
+    } catch (e: any) {
+      console.log(`[wire-out-ERROR] role=${this.role} type=${env.type}: ${e?.message ?? e}`);
       this.emit("error", e);
     }
   }

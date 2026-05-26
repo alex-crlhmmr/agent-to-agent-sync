@@ -402,7 +402,7 @@ export class CallManager extends EventEmitter {
       case "LIST_SESSIONS": {
         const p = env.payload as ListSessionsPayload;
         const available = this.listLocalAvailable?.() ?? [];
-        if (process.env.PEERD_DEBUG_SUBS) console.error(`[cm] LIST_SESSIONS inbound; have ${available.length} available`);
+        if (process.env.PEERD_DEBUG_SUBS) console.log(`[cm] LIST_SESSIONS inbound; have ${available.length} available`);
         const respPayload: ListSessionsResponsePayload = {
           request_id: p.request_id,
           sessions: available.map((s) => ({
@@ -419,7 +419,7 @@ export class CallManager extends EventEmitter {
 
       case "LIST_SESSIONS_RESPONSE": {
         const p = env.payload as ListSessionsResponsePayload;
-        if (process.env.PEERD_DEBUG_SUBS) console.error(`[cm] LIST_SESSIONS_RESPONSE for request ${p.request_id}: ${p.sessions.length} sessions`);
+        if (process.env.PEERD_DEBUG_SUBS) console.log(`[cm] LIST_SESSIONS_RESPONSE for request ${p.request_id}: ${p.sessions.length} sessions`);
         const pending = this.pendingListSessions.get(p.request_id);
         if (pending) {
           clearTimeout(pending.timer);
@@ -440,7 +440,7 @@ export class CallManager extends EventEmitter {
     if (!conn) throw new Error(`peer "${peerName}" not connected`);
     const request_id = "lr_" + crypto.randomBytes(8).toString("hex");
     const env = envelope<ListSessionsPayload>("LIST_SESSIONS", this.selfName, { request_id });
-    if (process.env.PEERD_DEBUG_SUBS) console.error(`[cm] listRemoteSessions: sending LIST_SESSIONS request_id=${request_id} to ${peerName}`);
+    if (process.env.PEERD_DEBUG_SUBS) console.log(`[cm] listRemoteSessions: sending LIST_SESSIONS request_id=${request_id} to ${peerName}`);
     return new Promise<SessionInfo[]>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingListSessions.delete(request_id);
@@ -597,21 +597,21 @@ export class CallManager extends EventEmitter {
   }
 
   private async handleIncomingShareFile(conn: Connection, cid: string, env: Envelope): Promise<void> {
-    console.error(`[cm] inbound SHARE_FILE call=${cid} from=${env.from} seq=${env.seq}`);
+    console.log(`[cm] inbound SHARE_FILE call=${cid} from=${env.from} seq=${env.seq}`);
     const call = this.calls.get(cid);
     if (!call) {
-      console.error(`[cm] SHARE_FILE: unknown call ${cid}; have calls=[${Array.from(this.calls.keys()).join(",")}]`);
+      console.log(`[cm] SHARE_FILE: unknown call ${cid}; have calls=[${Array.from(this.calls.keys()).join(",")}]`);
       conn.send(errorEnvelope(this.selfName, ErrorCode.UNKNOWN_CALL, "no such call", { call_id: cid }));
       return;
     }
     if (call.state !== "CONNECTED") {
-      console.error(`[cm] SHARE_FILE: call ${cid} not CONNECTED (state=${call.state})`);
+      console.log(`[cm] SHARE_FILE: call ${cid} not CONNECTED (state=${call.state})`);
       conn.send(errorEnvelope(this.selfName, ErrorCode.UNKNOWN_CALL, `call in state ${call.state}`, { call_id: cid }));
       return;
     }
     const senderRole = env.from === call.caller ? "caller" : "callee";
     if (call.floor !== senderRole) {
-      console.error(`[cm] SHARE_FILE: OUT_OF_TURN (floor=${call.floor}, sender=${senderRole})`);
+      console.log(`[cm] SHARE_FILE: OUT_OF_TURN (floor=${call.floor}, sender=${senderRole})`);
       conn.send(errorEnvelope(this.selfName, ErrorCode.OUT_OF_TURN, "floor mismatch", { call_id: cid, in_response_to_seq: env.seq }));
       return;
     }
@@ -626,7 +626,7 @@ export class CallManager extends EventEmitter {
       from: env.from,
       payload: env.payload as ShareFilePayload,
     };
-    console.error(`[cm] emitting file_shared message event for call ${cid}`);
+    console.log(`[cm] emitting file_shared message event for call ${cid}`);
     this.emit("message", evt);
   }
 
